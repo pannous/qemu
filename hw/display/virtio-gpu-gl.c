@@ -133,7 +133,8 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
         return;
     }
 
-    if (!display_opengl) {
+#ifdef CONFIG_OPENGL
+    if (!virtio_gpu_venus_enabled(g->parent_obj.conf) && !display_opengl) {
         error_setg(errp,
                    "The display backend does not have OpenGL support enabled");
         error_append_hint(errp,
@@ -142,6 +143,7 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
                           "to use.\n");
         return;
     }
+#endif
 
     g->parent_obj.conf.flags |= (1 << VIRTIO_GPU_FLAG_VIRGL_ENABLED);
     g->capset_ids = virtio_gpu_virgl_get_capsets(g);
@@ -217,4 +219,6 @@ static void virtio_register_types(void)
 type_init(virtio_register_types)
 
 module_dep("hw-display-virtio-gpu");
+#ifdef CONFIG_OPENGL
 module_dep("ui-opengl");
+#endif
