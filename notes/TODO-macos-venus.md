@@ -1,5 +1,18 @@
 # TODO: macOS Venus/Vulkan Support
 
+## Critical Blocker
+
+**Homebrew QEMU lacks virglrenderer/Venus support.**
+
+The stock `brew install qemu` does NOT include:
+- `virtio-vga-gl` device
+- `virtio-gpu-gl` device
+- Venus protocol support
+
+**Solution:** Build QEMU from source with virglrenderer.
+
+---
+
 ## Completed ✓
 
 - [x] **MoltenVK ICD Auto-Discovery**
@@ -145,6 +158,52 @@
 | Blob scanout | Will fail | Expected, documented |
 | Extension filtering | MoltenVK handles | Needs verification |
 | Redox guest | Unknown | Primary test target |
+
+---
+
+---
+
+## Final Validation: vkcube Demo
+
+### Test Environment Ready
+- **Alpine Linux ISO**: `../redox/venus-test/alpine-virt-x86_64.iso` (63MB)
+- **Test scripts**: `../redox/scripts/venus-*.sh`
+
+### vkcube Test Procedure
+
+1. **Build QEMU with Venus** (see above)
+
+2. **Boot Alpine Linux**
+   ```bash
+   ./qemu-system-x86_64 \
+       -M q35 -cpu max -smp 2 -m 2G \
+       -device virtio-vga-gl,hostmem=1G,blob=true,venus=true \
+       -vga none -display cocoa,gl=es \
+       -object memory-backend-memfd,id=mem1,size=2G \
+       -machine memory-backend=mem1 \
+       -cdrom ../redox/venus-test/alpine-virt-x86_64.iso \
+       -boot d -usb -device usb-tablet \
+       -net nic,model=virtio -net user
+   ```
+
+3. **Inside Alpine** (login as root, no password):
+   ```bash
+   apk update
+   apk add mesa-vulkan-virtio vulkan-tools mesa-dri-gallium
+   vulkaninfo --summary
+   vkcube
+   ```
+
+4. **Expected Output**:
+   ```
+   GPU id : 0 (Virtio-GPU Venus (Intel/AMD/Apple via MoltenVK))
+   ```
+
+### Success Criteria
+- [ ] `vulkaninfo` shows "Virtio-GPU Venus"
+- [ ] `vkcube` renders spinning cube
+- [ ] No GPU hangs or crashes
+- [ ] Fence synchronization works (smooth animation)
 
 ---
 
