@@ -1139,6 +1139,44 @@ void virtio_gpu_virgl_reset(VirtIOGPU *g)
     virgl_renderer_reset();
 }
 
+#ifdef __APPLE__
+/*
+ * On macOS, ensure the Vulkan loader can find MoltenVK ICD for Venus.
+ * The Vulkan loader searches VK_ICD_FILENAMES (or VK_DRIVER_FILES) for
+ * ICD manifest JSON files. If neither is set, try common MoltenVK paths.
+ */
+static void setup_moltenvk_icd(void)
+{
+    static const char *moltenvk_paths[] = {
+        "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json",
+        "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
+        "/opt/homebrew/opt/molten-vk/share/vulkan/icd.d/MoltenVK_icd.json",
+        "/usr/local/opt/molten-vk/share/vulkan/icd.d/MoltenVK_icd.json",
+        NULL
+    };
+    const char *icd_env;
+
+    icd_env = g_getenv("VK_ICD_FILENAMES");
+    if (icd_env && *icd_env) {
+        return;
+    }
+    icd_env = g_getenv("VK_DRIVER_FILES");
+    if (icd_env && *icd_env) {
+        return;
+    }
+
+    for (int i = 0; moltenvk_paths[i]; i++) {
+        if (g_file_test(moltenvk_paths[i], G_FILE_TEST_EXISTS)) {
+            g_setenv("VK_ICD_FILENAMES", moltenvk_paths[i], 0);
+            return;
+        }
+    }
+
+    error_report("MoltenVK ICD not found. Venus requires MoltenVK on macOS. "
+                 "Install via: brew install molten-vk, or set VK_ICD_FILENAMES.");
+}
+#endif
+
 int virtio_gpu_virgl_init(VirtIOGPU *g)
 {
     int ret;
@@ -1159,6 +1197,9 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
 #if VIRGL_VERSION_MAJOR >= 1
     if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
         flags |= VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER;
+#ifdef __APPLE__
+        setup_moltenvk_icd();
+#endif
     }
 #endif
 
