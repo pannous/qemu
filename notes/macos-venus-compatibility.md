@@ -46,6 +46,23 @@ Scanout paths:
 - Blob: dmabuf → fails on macOS (no dmabuf support)
 ```
 
+## Vulkan Extension Filtering
+**Status: Handled automatically by MoltenVK**
+
+Extension filtering is NOT done in QEMU. The filtering chain:
+1. Guest queries extensions via Venus protocol
+2. virglrenderer queries Vulkan driver
+3. MoltenVK reports supported extensions to virglrenderer
+4. Extensions flow back to guest
+
+MoltenVK (1.4+) supports Vulkan 1.4 with known limitations:
+- Pipeline statistics query pool (`VK_QUERY_TYPE_PIPELINE_STATISTICS`) not supported
+- PVRTC compressed formats require direct host-visible mapping
+- Some features require specific Metal versions (3.0+)
+- Some features require Apple GPU specifically
+
+See: https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Runtime_UserGuide.md
+
 ## Future Work
 To fully support blob scanout on macOS would require:
 1. IOSurface-based alternative to dmabuf
