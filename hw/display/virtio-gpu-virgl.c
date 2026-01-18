@@ -742,6 +742,14 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
 
     res->base.dmabuf_fd = info.fd;
 
+#ifdef __APPLE__
+    if (res->base.dmabuf_fd < 0) {
+        warn_report_once("Blob resource %d created without dmabuf backing. "
+                         "Blob scanout will not work on macOS without dmabuf support.",
+                         cblob.resource_id);
+    }
+#endif
+
     QTAILQ_INSERT_HEAD(&g->reslist, &res->base, next);
     res = NULL;
 }
@@ -849,8 +857,16 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         return;
     }
     if (res->base.dmabuf_fd < 0) {
+#ifdef __APPLE__
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: resource %d not backed by dmabuf. "
+                      "Blob scanout requires dmabuf which is unavailable on macOS. "
+                      "Use non-blob scanout or disable blob resources.\n",
+                      __func__, ss.resource_id);
+#else
         qemu_log_mask(LOG_GUEST_ERROR, "%s: resource not backed by dmabuf %d\n",
                       __func__, ss.resource_id);
+#endif
         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
         return;
     }
