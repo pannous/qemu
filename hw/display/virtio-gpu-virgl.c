@@ -1283,6 +1283,10 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
 #if VIRGL_VERSION_MAJOR >= 1
     if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
         flags |= VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER;
+#ifndef CONFIG_OPENGL
+        /* Skip vrend (OpenGL) initialization when OpenGL is not available */
+        flags |= VIRGL_RENDERER_NO_VIRGL;
+#endif
 #ifdef __APPLE__
         setup_moltenvk_icd();
 #endif
