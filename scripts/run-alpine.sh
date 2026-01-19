@@ -13,11 +13,19 @@ QEMU_DIR="$(dirname "$SCRIPT_DIR")"
 QEMU="${QEMU_DIR}/build/qemu-system-aarch64"
 ISO="/tmp/alpine-virt-3.21.0-aarch64.iso"
 DISK="/tmp/alpine-disk.qcow2"
-EFI_CODE="/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
+EFI_CODE="/opt/other/redox/tools/firmware/edk2-aarch64-code.fd"
 EFI_VARS="/tmp/alpine-efivars.fd"
 
 # MoltenVK ICD - correct path for Homebrew installation
 export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json
+
+# Vulkan loader library path for virglrenderer Venus backend
+# Note: May need symlink: ln -sf /opt/homebrew/lib/libvulkan.dylib /opt/homebrew/lib/libvulkan.so
+export DYLD_LIBRARY_PATH=/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
+
+# Venus/virgl debug (uncomment for troubleshooting)
+# export VKR_DEBUG=all
+# export MVK_CONFIG_LOG_LEVEL=2
 
 # Check QEMU
 if [[ ! -x "$QEMU" ]]; then
@@ -46,7 +54,6 @@ MODE="${1:-run}"
 COMMON_OPTS=(
     -M virt -accel hvf -cpu host -m 2G -smp 4
     -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M
-    -device virtio-gpu-pci
     -display cocoa
     -device qemu-xhci -device usb-kbd -device usb-tablet
     -device virtio-net-pci,netdev=net0
@@ -84,14 +91,16 @@ case "$MODE" in
         ;;
 
     run)
-        # Run mode: boot from installed disk with EFI
-        if [[ ! -s "$DISK" ]] || [[ $(qemu-img info "$DISK" 2>/dev/null | grep 'virtual size' | grep -o '[0-9.]*') == "0" ]]; then
-            echo "Disk appears empty. Run with 'install' first:"
+        # Run mode: boot from installed disk using direct kernel boot
+        # (Alpine installs without EFI by default when using direct kernel boot)
+
+        # Check disk exists and has data
+        if [[ ! -s "$DISK" ]]; then
+            echo "Disk not found. Run with 'install' first:"
             echo "  $0 install"
             exit 1
         fi
 
-        # Check if disk has been installed (has any data beyond initial qcow2)
         ACTUAL_SIZE=$(qemu-img info "$DISK" 2>/dev/null | grep 'disk size' | awk '{print $3}')
         if [[ "$ACTUAL_SIZE" == "196" ]]; then  # Empty qcow2 is ~196K
             echo "Disk appears empty. Run with 'install' first:"
@@ -99,9 +108,33 @@ case "$MODE" in
             exit 1
         fi
 
+        # Extract kernel from installed disk if not already done
+        INSTALLED_KERNEL="/tmp/alpine-installed/vmlinuz-virt"
+        INSTALLED_INITRD="/tmp/alpine-installed/initramfs-virt"
+
+        if [[ ! -f "$INSTALLED_KERNEL" ]]; then
+            echo "Extracting kernel from installed disk..."
+            mkdir -p /tmp/alpine-installed
+            # Mount qcow2 using guestfish/libguestfs or nbd
+            if command -v guestfish &>/dev/null; then
+                guestfish --ro -a "$DISK" -m /dev/sda3 \
+                    copy-out /boot/vmlinuz-virt /tmp/alpine-installed/ : \
+                    copy-out /boot/initramfs-virt /tmp/alpine-installed/ 2>/dev/null
+            fi
+        fi
+
+        # Fall back to ISO kernel if extraction failed
+        if [[ ! -f "$INSTALLED_KERNEL" ]]; then
+            echo "Note: Using ISO kernel (guestfish not available for extraction)"
+            INSTALLED_KERNEL="/tmp/alpine-boot/boot/vmlinuz-virt"
+            INSTALLED_INITRD="/tmp/alpine-boot/boot/initramfs-virt"
+        fi
+
+        # Boot with root on vda3 (standard Alpine sys install layout: vda1=boot, vda2=swap, vda3=root)
         exec "$QEMU" "${COMMON_OPTS[@]}" \
-            -drive if=pflash,format=raw,readonly=on,file="$EFI_CODE" \
-            -drive if=pflash,format=raw,file="$EFI_VARS" \
+            -kernel "$INSTALLED_KERNEL" \
+            -initrd "$INSTALLED_INITRD" \
+            -append "console=ttyAMA0 root=/dev/vda3 modules=ext4 rootfstype=ext4 quiet" \
             -drive if=virtio,file="$DISK",format=qcow2
         ;;
 

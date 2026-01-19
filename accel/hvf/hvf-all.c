@@ -110,7 +110,13 @@ static void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
     if (!add) {
         trace_hvf_vm_unmap(gpa, size);
         ret = hv_vm_unmap(gpa, size);
-        assert_hvf_ok(ret);
+        /*
+         * HV_BAD_ARGUMENT can happen if the region was never mapped
+         * (e.g., non-page-aligned blob memory). Ignore this case.
+         */
+        if (ret != HV_SUCCESS && ret != HV_BAD_ARGUMENT) {
+            assert_hvf_ok(ret);
+        }
         return;
     }
 
