@@ -158,7 +158,23 @@ virtio_gpu_get_flags(void *opaque)
     int flags = GRAPHIC_FLAGS_NONE;
 
     if (virtio_gpu_virgl_enabled(g->conf)) {
+#ifdef CONFIG_OPENGL
+        /*
+         * With OpenGL available, virgl mode uses host GL for rendering
+         * and requires a GL-capable display backend.
+         */
         flags |= GRAPHIC_FLAGS_GL;
+#else
+        /*
+         * Without OpenGL (e.g., macOS without EGL), Venus-only mode can
+         * still work because Vulkan rendering goes through virglrenderer
+         * to host Vulkan (MoltenVK). Framebuffer display uses software
+         * rendering via pixman. Only require GL if NOT in Venus mode.
+         */
+        if (!virtio_gpu_venus_enabled(g->conf)) {
+            flags |= GRAPHIC_FLAGS_GL;
+        }
+#endif
     }
 
     if (virtio_gpu_dmabuf_enabled(g->conf)) {
