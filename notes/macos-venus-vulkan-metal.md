@@ -259,45 +259,96 @@ qemu-system-x86_64 \
 
 1. **virglrenderer built with Venus support on macOS**
    - Location: `/opt/other/virglrenderer/install/`
-   - macOS compatibility patches applied (clock_nanosleep, MSG_CMSG_CLOEXEC, etc.)
+   - macOS compatibility patches applied:
+     - `clock_nanosleep` → `nanosleep` fallback
+     - `MSG_CMSG_CLOEXEC` stubbed
+     - `threads.h` → pthreads compatibility shim
+     - `SOCK_SEQPACKET` → `SOCK_STREAM` (macOS doesn't support SEQPACKET)
+     - `signalfd` stubbed for macOS
 
 2. **QEMU patches to enable Venus without OpenGL/EGL**
    - `hw/display/meson.build`: Added `elif virgl.found()` branches for Venus-only builds
    - `hw/display/virtio-gpu-gl.c`: Guarded OpenGL checks with `#ifdef CONFIG_OPENGL`
-   - `hw/display/virtio-gpu-virgl.c`: Guarded EGL includes and callbacks
+   - `hw/display/virtio-gpu-virgl.c`:
+     - Guarded EGL includes and callbacks
+     - Added `VIRGL_RENDERER_NO_VIRGL` flag for Venus-only mode
+     - No-op GL context callbacks for non-OpenGL builds
 
 3. **QEMU built with virglrenderer Venus support**
-   - virtio-vga-gl and virtio-gpu-gl-pci devices available
-   - `venus=on` property exposed on these devices
+   - virtio-gpu-gl-pci device available with `venus=on` property
+   - Render server forks and runs successfully
 
 4. **MoltenVK ICD auto-discovery** (already committed)
    - `setup_moltenvk_icd()` function searches common Homebrew paths
 
-5. **GL context requirement resolved** (2025-01-19)
-   - `hw/display/virtio-gpu-base.c`: `virtio_gpu_get_flags()` now skips
-     `GRAPHIC_FLAGS_GL` when Venus is enabled without OpenGL
-   - `hw/display/virtio-gpu-virgl.c`: Added no-op GL context callbacks
-     for Venus-only mode, guarded all `dpy_gl_*` calls with `#ifdef CONFIG_OPENGL`
-   - Software framebuffer fallback via `dpy_gfx_update_full()` for scanout
+5. **GL context requirement resolved**
+   - `hw/display/virtio-gpu-base.c`: Skip `GRAPHIC_FLAGS_GL` in Venus mode
+   - Software framebuffer fallback via `dpy_gfx_update_full()`
+
+6. **Venus render server working on macOS**
+   - SOCK_STREAM used instead of SOCK_SEQPACKET
+   - Render server process starts and communicates with QEMU
+
+7. **Alpine Linux aarch64 boots with HVF**
+   - Downloaded Alpine 3.23 aarch64 ISO
+   - QEMU signed with HVF entitlement
+   - Full boot verified via serial console
 
 ### QEMU Command Line
 
 ```bash
-# Venus-enabled VM on macOS (working)
-qemu-system-x86_64 \
-    -device virtio-vga-gl,venus=on,blob=on,hostmem=256M \
+# aarch64 VM with HVF on Apple Silicon (display working)
+VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+qemu-system-aarch64 \
+    -M virt -accel hvf -cpu host -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd \
+    -device virtio-gpu-pci \
     -display cocoa \
-    -m 1G \
-    -machine q35 \
-    -drive file=disk.img,format=raw,if=virtio
+    -cdrom alpine-virt-3.23.0-aarch64.iso \
+    -device qemu-xhci -device usb-kbd
+
+# With Venus for Vulkan (render server works, display needs work)
+VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+qemu-system-aarch64 \
+    -M virt -accel hvf -cpu host -m 2G \
+    -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd \
+    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M \
+    -display cocoa \
+    -cdrom alpine-virt-3.23.0-aarch64.iso
 ```
+
+### Remaining Issues
+
+1. **Display not active with virtio-gpu-gl Venus mode**
+   - The scanout path requires OpenGL textures which aren't available
+   - Need software fallback or dmabuf-like mechanism for display
+   - Workaround: Use separate virtio-gpu for display + virtio-gpu-gl for Venus
+
+2. **Venus capset verification pending**
+   - Need to install mesa-vulkan in guest and run vulkaninfo
 
 ### Next Steps
 
-1. Boot a Linux guest with Mesa Venus driver
-2. Run `vulkaninfo` to verify Venus capset is reported
-3. Test Vulkan apps (vkcube, etc.) in guest
-4. Boot Redox OS with Venus support
+1. Install vulkan-tools in Alpine guest
+2. Verify Venus capset is reported to guest
+3. Test vkcube or other Vulkan apps
+4. Fix display path for Venus-only mode
+
+## virglrenderer macOS Patches Required
+
+These patches are needed for virglrenderer on macOS:
+
+```c
+// src/proxy/proxy_socket.c - SOCK_STREAM instead of SOCK_SEQPACKET
+#ifdef __APPLE__
+   int ret = socketpair(AF_UNIX, SOCK_STREAM, 0, out_fds);
+#else
+   int ret = socketpair(AF_UNIX, SOCK_SEQPACKET, 0, out_fds);
+#endif
+
+// server/render_socket.c - Same change for server side
+// server/render_worker.c - threads.h compatibility + signalfd stubs
+```
 
 ## Testing Checklist
 
@@ -305,10 +356,12 @@ qemu-system-x86_64 \
 - [x] virglrenderer built with Venus support
 - [x] QEMU built with virglrenderer support
 - [x] QEMU starts without GL context assertion
+- [x] Venus render server starts on macOS
+- [x] Alpine Linux aarch64 boots with HVF
 - [ ] Venus capset reported to guest (`VIRTIO_GPU_CAPSET_VENUS`)
 - [ ] Guest Vulkan apps render correctly via Venus → MoltenVK
-- [ ] Fence synchronization working (no hangs)
-- [ ] Redox OS guest boots with Vulkan support
+- [ ] Display working in Venus mode (currently needs separate virtio-gpu)
+- [ ] Redox OS guest boots with Venus Vulkan support
 
 ## References
 
