@@ -281,9 +281,81 @@ qemu-system-x86_64 \
 
 **What doesn't work yet:**
 - Single-GPU Venus mode has no display (no OpenGL scanout path)
-- Venus capset not yet verified in guest (need to run vulkaninfo)
+- **Venus capset not being reported to guest** - `vulkaninfo` fails with "Failed to detect any valid GPUs"
 
-**Workaround:** Use dual-GPU configuration with separate virtio-gpu for display.
+### Test Results (2025-01-19)
+
+**Test Configuration:**
+```bash
+VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -m 2G -smp 4 \
+    -device virtio-gpu-pci \
+    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M \
+    -display cocoa \
+    -kernel vmlinuz-virt -initrd initramfs-virt \
+    -cdrom alpine-virt-3.21.0-aarch64.iso
+```
+
+**Guest Environment:**
+- Alpine Linux 3.21, kernel 6.12.1-3-virt (aarch64)
+- Installed: mesa-vulkan-virtio, vulkan-loader, vulkan-tools
+
+**Observations:**
+
+1. **Dual DRM devices detected:**
+   - `/dev/dri/card0` (renderD128) - virtio-gpu-pci
+   - `/dev/dri/card1` (renderD129) - virtio-gpu-gl-pci with Venus
+
+2. **virtio-gpu features (from /sys/class/drm/card*/device/virtio*/features):**
+   - card0: `0100...` (basic virtio-gpu)
+   - card1: `1101100...` (VIRGL + EDID + BLOB + CONTEXT_INIT)
+
+3. **Render server running on host:**
+   - `/opt/other/virglrenderer/install/libexec/virgl_render_server --socket-fd 23`
+
+4. **Vulkan loader finds driver but initialization fails:**
+   ```
+   [Vulkan Loader] DRIVER: Found ICD manifest file /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
+   [Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /usr/lib/libvulkan_virtio.so
+   ERROR: setup_loader_term_phys_devs: Failed to detect any valid GPUs in the current config
+   ```
+
+5. **DRM ioctl succeeds for basic operations:**
+   - `DRM_IOCTL_VERSION` works
+   - `DRM_IOCTL_VIRTGPU_GETPARAM` works
+   - **Issue:** Venus capset (cap_set_id=4) may not be reported
+
+**Root Cause Analysis:**
+The Mesa virtio Venus driver requires the host to report VIRTIO_GPU_CAPSET_VENUS (capset_id=4).
+This capset is filled by virglrenderer via `virgl_renderer_fill_caps()`.
+
+**Key Finding (2025-01-19):**
+- virglrenderer HAS Venus support (confirmed via `nm libvirglrenderer.dylib | grep vn_`)
+- **MoltenVK ICD path was WRONG**:
+  - Wrong: `/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json` (does not exist)
+  - Correct: `/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json`
+- Host `vulkaninfo` works with correct VK_ICD_FILENAMES path
+
+**Critical Discovery - Device Order Matters (2025-01-19):**
+Capset test results showed:
+```
+/dev/dri/renderD128: Venus capset ret=-1 has_data=0
+/dev/dri/renderD129: Venus capset ret=0 has_data=1
+```
+
+Mesa's virtio Vulkan driver opens `renderD128` first (the device without Venus), not `renderD129` (the device WITH Venus). The fix is to put the Venus device FIRST in the QEMU command line so it becomes renderD128:
+
+```bash
+# WRONG: Venus device second (becomes renderD129)
+-device virtio-gpu-pci \
+-device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M
+
+# CORRECT: Venus device first (becomes renderD128)
+-device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M \
+-device virtio-gpu-pci
+```
+
+**Workaround:** Use dual-GPU configuration with Venus device listed first.
 
 ### Completed
 
@@ -333,7 +405,7 @@ qemu-system-x86_64 \
 
 ```bash
 # aarch64 VM with HVF on Apple Silicon (display working)
-VK_ICD_FILENAMES=/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json \
+VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json \
 qemu-system-aarch64 \
     -M virt -accel hvf -cpu host -m 2G \
     -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd \
@@ -343,19 +415,20 @@ qemu-system-aarch64 \
     -device qemu-xhci -device usb-kbd
 
 # DUAL-GPU: Display + Venus for Vulkan (RECOMMENDED for macOS)
-# virtio-gpu-pci provides display, virtio-gpu-gl-pci provides Venus/Vulkan
-VK_ICD_FILENAMES=/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json \
+# IMPORTANT: Venus device MUST be listed FIRST so it becomes renderD128
+# (Mesa's virtio Vulkan driver opens renderD128 first)
+VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json \
 qemu-system-aarch64 \
     -M virt -accel hvf -cpu host -m 2G -smp 4 \
     -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd \
-    -device virtio-gpu-pci \
     -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M \
+    -device virtio-gpu-pci \
     -display cocoa \
     -cdrom alpine-virt-3.23.0-aarch64.iso \
     -device qemu-xhci -device usb-kbd -device usb-tablet
 
 # Single GPU Venus (display won't work - no OpenGL scanout)
-VK_ICD_FILENAMES=/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json \
+VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json \
 qemu-system-aarch64 \
     -M virt -accel hvf -cpu host -m 2G \
     -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd \
@@ -377,24 +450,27 @@ qemu-system-aarch64 \
 
 ### Next Steps
 
-1. **Fix render_socket.c SOCK_SEQPACKET** (line 42 still uses SEQPACKET)
-   - render_socket_pair() needs same SOCK_STREAM patch as proxy_socket_pair()
+1. **Debug Venus capset reporting** (HIGH PRIORITY)
+   - Check if virglrenderer Venus support was properly built
+   - Verify MoltenVK is being found by virglrenderer (check VK_ICD_FILENAMES propagation)
+   - Add debug logging to QEMU's `virtio_gpu_virgl_get_capsets()` to see what capsets are reported
+   - Write test program in guest to query capset_id=4 via `DRM_IOCTL_VIRTGPU_GET_CAPS`
 
-2. **Test dual-GPU configuration**
+2. **Verify virglrenderer Venus build**
    ```bash
-   qemu-system-aarch64 ... \
-       -device virtio-gpu-pci \                    # For display
-       -device virtio-gpu-gl-pci,venus=on \        # For Venus/Vulkan
+   # Check if Venus was compiled in
+   nm /opt/other/virglrenderer/install/lib/libvirglrenderer.dylib | grep venus
+   # Check render server capabilities
+   strings /opt/other/virglrenderer/install/libexec/virgl_render_server | grep -i venus
    ```
 
-3. **Install Vulkan tools in Alpine**
-   - Default repos don't have vulkan-tools
-   - Need: `apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing vulkan-tools`
-   - Or use a distro with better Vulkan support (Fedora, Ubuntu)
+3. **Test MoltenVK visibility to render server**
+   - The render server runs as a subprocess - does it inherit VK_ICD_FILENAMES?
+   - Try running vulkaninfo on host with same environment
 
-4. **Verify Venus capset reported to guest**
-   - Run vulkaninfo to see if Venus driver is detected
-   - Check /sys/class/drm/card*/device for virtio_gpu
+4. **Alternative: Use software Vulkan renderer**
+   - Install `mesa-vulkan-swrast` in guest for software rendering
+   - If swrast works, confirms guest driver stack is OK
 
 5. **Fix display for Venus-only mode** (longer term)
    - Options: software scanout, virtio-gpu for framebuffer only
@@ -493,3 +569,10 @@ Why do we need read pixels back?
 You need it only for bootstrapping, validation, or fallback display paths.
 
 vnc://localhost:5901
+
+                                                                                                        
+QEMU already has IOSurface integration in apple-gfx-mmio.m that we can reference.                     
+❯ 1. Phase 1: Metal readback (Recommended)                                                                                   
+     Simpler - read pixels from Metal to CPU for display. Gets it working first.                                             
+  2. Phase 2: IOSurface zero-copy                                                                                            
+     Optimal performance but requires virglrenderer fork/changes.  
