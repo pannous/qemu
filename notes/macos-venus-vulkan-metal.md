@@ -273,59 +273,40 @@ qemu-system-x86_64 \
 4. **MoltenVK ICD auto-discovery** (already committed)
    - `setup_moltenvk_icd()` function searches common Homebrew paths
 
-### Blocker: Host Display Requires GL Context
+5. **GL context requirement resolved** (2025-01-19)
+   - `hw/display/virtio-gpu-base.c`: `virtio_gpu_get_flags()` now skips
+     `GRAPHIC_FLAGS_GL` when Venus is enabled without OpenGL
+   - `hw/display/virtio-gpu-virgl.c`: Added no-op GL context callbacks
+     for Venus-only mode, guarded all `dpy_gl_*` calls with `#ifdef CONFIG_OPENGL`
+   - Software framebuffer fallback via `dpy_gfx_update_full()` for scanout
 
-**Problem:** virtio-vga-gl device sets `GRAPHIC_FLAGS_GL` which requires the host
-display backend to provide an OpenGL context. On macOS without EGL, no display
-backend can provide this.
+### QEMU Command Line
 
-**Code path:**
+```bash
+# Venus-enabled VM on macOS (working)
+qemu-system-x86_64 \
+    -device virtio-vga-gl,venus=on,blob=on,hostmem=256M \
+    -display cocoa \
+    -m 1G \
+    -machine q35 \
+    -drive file=disk.img,format=raw,if=virtio
 ```
-virtio-gpu-gl device realize
-  → registers console with GRAPHIC_FLAGS_GL
-console_gl_check_compatible()
-  → checks `console_has_gl(con)`
-  → fails because no GL display backend
-```
 
-**Why this happens:**
-- Venus handles Vulkan rendering in the guest
-- But host-side framebuffer display still uses OpenGL path in virtio-vga-gl
-- QEMU's OpenGL support requires EGL (Linux) or unavailable on macOS
+### Next Steps
 
-### Possible Solutions
-
-1. **Implement CGL (Core OpenGL) backend for QEMU** - Medium effort
-   - macOS has Core OpenGL, just not EGL
-   - Would need new ui/cocoa-gl.c implementation
-
-2. **Add software fallback for framebuffer display** - Lower effort
-   - When GL not available, use pixman/SDL for framebuffer blit
-   - Guest rendering still uses Venus/Vulkan, just display is software
-
-3. **Use headless mode with VNC** - Already tried, still needs GL
-   - virtio-vga-gl device itself requires GL, not just display
-
-4. **Port ANGLE to provide EGL on macOS** - High effort
-   - ANGLE provides EGL over Metal/CGL
-   - Would enable standard QEMU OpenGL path
-
-### Recommended Next Step
-
-The lowest-effort solution is to add a software framebuffer fallback path
-in virtio-gpu-gl.c that doesn't require host GL for Venus-only mode. Since
-Venus/Vulkan rendering happens entirely on the guest side (with commands
-forwarded to host Vulkan/MoltenVK), the host only needs to display the
-resulting framebuffer - which can be done without GL.
+1. Boot a Linux guest with Mesa Venus driver
+2. Run `vulkaninfo` to verify Venus capset is reported
+3. Test Vulkan apps (vkcube, etc.) in guest
+4. Boot Redox OS with Venus support
 
 ## Testing Checklist
 
 - [x] MoltenVK installed and ICD discoverable
 - [x] virglrenderer built with Venus support
 - [x] QEMU built with virglrenderer support
+- [x] QEMU starts without GL context assertion
 - [ ] Venus capset reported to guest (`VIRTIO_GPU_CAPSET_VENUS`)
-- [ ] Non-blob scanout working (OpenGL texture path)
-- [ ] Guest Vulkan apps render correctly
+- [ ] Guest Vulkan apps render correctly via Venus → MoltenVK
 - [ ] Fence synchronization working (no hangs)
 - [ ] Redox OS guest boots with Vulkan support
 
