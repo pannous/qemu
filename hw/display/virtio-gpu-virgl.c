@@ -381,7 +381,15 @@ static void virtio_gpu_rect_update(VirtIOGPU *g, int idx, int x, int y,
         return;
     }
 
+#ifdef CONFIG_OPENGL
     dpy_gl_update(g->parent_obj.scanout[idx].con, x, y, width, height);
+#else
+    /*
+     * Venus-only mode without OpenGL: trigger a display update.
+     * The actual rendering happens via Vulkan/MoltenVK on the host.
+     */
+    dpy_gfx_update_full(g->parent_obj.scanout[idx].con);
+#endif
 }
 
 static void virgl_cmd_resource_flush(VirtIOGPU *g,
@@ -444,16 +452,28 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
                             ss.r.width, ss.r.height);
         virgl_renderer_force_ctx_0();
+#ifdef CONFIG_OPENGL
         dpy_gl_scanout_texture(
             g->parent_obj.scanout[ss.scanout_id].con, info.tex_id,
             info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
             info.width, info.height,
             ss.r.x, ss.r.y, ss.r.width, ss.r.height,
             d3d_tex2d);
+#else
+        /*
+         * Venus-only mode without OpenGL: set up software scanout.
+         * Vulkan rendering is handled by virglrenderer → MoltenVK.
+         * Display updates happen via dpy_gfx_update in resource flush.
+         */
+        (void)info;
+        (void)d3d_tex2d;
+#endif
     } else {
         dpy_gfx_replace_surface(
             g->parent_obj.scanout[ss.scanout_id].con, NULL);
+#ifdef CONFIG_OPENGL
         dpy_gl_scanout_disable(g->parent_obj.scanout[ss.scanout_id].con);
+#endif
     }
     g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
 }
@@ -1056,6 +1076,7 @@ static void virgl_write_context_fence(void *opaque, uint32_t ctx_id,
 }
 #endif
 
+#ifdef CONFIG_OPENGL
 static virgl_renderer_gl_context
 virgl_create_context(void *opaque, int scanout_idx,
                      struct virgl_renderer_gl_ctx_param *params)
@@ -1104,6 +1125,51 @@ static struct virgl_renderer_callbacks virtio_gpu_3d_cbs = {
 #endif
 };
 
+#else /* !CONFIG_OPENGL */
+
+/*
+ * Venus-only mode without OpenGL: provide no-op GL context callbacks.
+ * Venus uses Vulkan rendering via virglrenderer and doesn't need GL contexts.
+ * These stubs satisfy virglrenderer's callback requirements while indicating
+ * no GL context is available.
+ */
+static virgl_renderer_gl_context
+virgl_create_context_stub(void *opaque, int scanout_idx,
+                          struct virgl_renderer_gl_ctx_param *params)
+{
+    /* No GL context available - Venus mode uses Vulkan */
+    return NULL;
+}
+
+static void virgl_destroy_context_stub(void *opaque,
+                                       virgl_renderer_gl_context ctx)
+{
+    /* Nothing to destroy */
+}
+
+static int virgl_make_context_current_stub(void *opaque, int scanout_idx,
+                                           virgl_renderer_gl_context ctx)
+{
+    /* No GL context to make current - return success for NULL context */
+    return ctx == NULL ? 0 : -1;
+}
+
+static struct virgl_renderer_callbacks virtio_gpu_3d_cbs = {
+#if VIRGL_VERSION_MAJOR >= 1
+    .version             = 3,
+#else
+    .version             = 1,
+#endif
+    .write_fence         = virgl_write_fence,
+    .create_gl_context   = virgl_create_context_stub,
+    .destroy_gl_context  = virgl_destroy_context_stub,
+    .make_current        = virgl_make_context_current_stub,
+#if VIRGL_VERSION_MAJOR >= 1
+    .write_context_fence = virgl_write_context_fence,
+#endif
+};
+#endif /* CONFIG_OPENGL */
+
 static void virtio_gpu_print_stats(void *opaque)
 {
     VirtIOGPU *g = opaque;
@@ -1148,7 +1214,9 @@ void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g)
 
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
         dpy_gfx_replace_surface(g->parent_obj.scanout[i].con, NULL);
+#ifdef CONFIG_OPENGL
         dpy_gl_scanout_disable(g->parent_obj.scanout[i].con);
+#endif
     }
 }
 
