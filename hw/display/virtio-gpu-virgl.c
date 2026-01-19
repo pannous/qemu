@@ -338,8 +338,24 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
                                      struct virtio_gpu_ctrl_command *cmd)
 {
     struct virtio_gpu_ctx_create cc;
+    size_t cmd_size;
 
-    VIRTIO_GPU_FILL_CMD(cc);
+    /*
+     * Handle both old (without context_init) and new format commands.
+     * Old format is 92 bytes, new format is 96 bytes.
+     */
+    memset(&cc, 0, sizeof(cc));
+    cmd_size = iov_to_buf(cmd->elem.out_sg, cmd->elem.out_num, 0,
+                          &cc, sizeof(cc));
+
+    /* Accept old format (without context_init) - minimum size is just hdr */
+    if (cmd_size < sizeof(struct virtio_gpu_ctrl_hdr)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: command size too small %zu\n", __func__, cmd_size);
+        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+        return;
+    }
+
     trace_virtio_gpu_cmd_ctx_create(cc.hdr.ctx_id,
                                     cc.debug_name);
 
@@ -352,6 +368,17 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
         }
 
 #if VIRGL_VERSION_MAJOR >= 1
+#ifndef CONFIG_OPENGL
+        /*
+         * Venus-only mode: only forward Venus context requests (capset=4).
+         * VIRGL/VIRGL2 contexts (capset 1,2) would fail without vrend.
+         * Accept them as no-op so UEFI can proceed.
+         */
+        if (virtio_gpu_venus_enabled(g->parent_obj.conf) &&
+            cc.context_init != VIRTIO_GPU_CAPSET_VENUS) {
+            return;  /* No-op for non-Venus contexts */
+        }
+#endif
         virgl_renderer_context_create_with_flags(cc.hdr.ctx_id,
                                                  cc.context_init,
                                                  cc.nlen,
@@ -359,6 +386,18 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
         return;
 #endif
     }
+
+#ifndef CONFIG_OPENGL
+    /*
+     * Venus-only mode without OpenGL: non-Venus context creation
+     * (context_init=0 defaults to VIRGL2) would fail because vrend
+     * is not initialized. Accept the request as a no-op so UEFI
+     * can proceed. Only Venus contexts will actually work.
+     */
+    if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+        return;  /* Success - no-op for non-Venus contexts */
+    }
+#endif
 
     virgl_renderer_context_create(cc.hdr.ctx_id, cc.nlen, cc.debug_name);
 }
@@ -414,7 +453,9 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                                   struct virtio_gpu_ctrl_command *cmd)
 {
     struct virtio_gpu_set_scanout ss;
+#ifdef CONFIG_OPENGL
     int ret;
+#endif
 
     VIRTIO_GPU_FILL_CMD(ss);
     trace_virtio_gpu_cmd_set_scanout(ss.scanout_id, ss.resource_id,
@@ -429,6 +470,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     g->parent_obj.enable = 1;
 
     if (ss.resource_id && ss.r.width && ss.r.height) {
+#ifdef CONFIG_OPENGL
         struct virgl_renderer_resource_info info;
         void *d3d_tex2d = NULL;
 
@@ -452,7 +494,6 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
                             ss.r.width, ss.r.height);
         virgl_renderer_force_ctx_0();
-#ifdef CONFIG_OPENGL
         dpy_gl_scanout_texture(
             g->parent_obj.scanout[ss.scanout_id].con, info.tex_id,
             info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
@@ -461,12 +502,26 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             d3d_tex2d);
 #else
         /*
-         * Venus-only mode without OpenGL: set up software scanout.
-         * Vulkan rendering is handled by virglrenderer → MoltenVK.
-         * Display updates happen via dpy_gfx_update in resource flush.
+         * Venus-only mode without OpenGL: use QEMU's resource tracking.
+         * virglrenderer may not have the resource since vrend isn't initialized.
+         * Look up the resource in QEMU's list to verify it exists.
          */
-        (void)info;
-        (void)d3d_tex2d;
+        struct virtio_gpu_virgl_resource *res;
+        res = virtio_gpu_virgl_find_resource(g, ss.resource_id);
+        if (!res) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: resource not found %d\n",
+                          __func__, ss.resource_id);
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+            return;
+        }
+        qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
+                            ss.r.width, ss.r.height);
+        /*
+         * No OpenGL scanout - Venus uses Vulkan rendering via MoltenVK.
+         * The bootloader display won't show but the guest can still boot.
+         * For display, use a separate virtio-gpu device.
+         */
 #endif
     } else {
         dpy_gfx_replace_surface(
@@ -1284,7 +1339,10 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
     if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
         flags |= VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER;
 #ifndef CONFIG_OPENGL
-        /* Skip vrend (OpenGL) initialization when OpenGL is not available */
+        /*
+         * Skip vrend (OpenGL) initialization when OpenGL is not available.
+         * Non-Venus context creates are handled as no-ops in QEMU.
+         */
         flags |= VIRGL_RENDERER_NO_VIRGL;
 #endif
 #ifdef __APPLE__
