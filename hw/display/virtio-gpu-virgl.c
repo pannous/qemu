@@ -35,6 +35,11 @@ struct virtio_gpu_virgl_resource {
     MemoryRegion *mr;
 #ifdef __APPLE__
     IOSurfaceRef iosurface;
+    void *mapped_blob;      /* Blob pointer from virgl_renderer_resource_map */
+    uint64_t mapped_size;   /* Size of mapped blob */
+    /* Software scanout support for 2D resources without OpenGL */
+    pixman_image_t *scanout_image;  /* Pixman image for software scanout */
+    uint32_t scanout_stride;        /* Stride of scanout buffer */
 #endif
 };
 
@@ -206,8 +211,10 @@ static void virgl_cmd_create_resource_2d(VirtIOGPU *g,
                                          struct virtio_gpu_ctrl_command *cmd)
 {
     struct virtio_gpu_resource_create_2d c2d;
-    struct virgl_renderer_resource_create_args args;
     struct virtio_gpu_virgl_resource *res;
+#ifdef CONFIG_OPENGL
+    struct virgl_renderer_resource_create_args args;
+#endif
 
     VIRTIO_GPU_FILL_CMD(c2d);
     trace_virtio_gpu_cmd_res_create_2d(c2d.resource_id, c2d.format,
@@ -236,6 +243,7 @@ static void virgl_cmd_create_resource_2d(VirtIOGPU *g,
     res->base.dmabuf_fd = -1;
     QTAILQ_INSERT_HEAD(&g->reslist, &res->base, next);
 
+#ifdef CONFIG_OPENGL
     args.handle = c2d.resource_id;
     args.target = 2;
     args.format = c2d.format;
@@ -248,6 +256,21 @@ static void virgl_cmd_create_resource_2d(VirtIOGPU *g,
     args.nr_samples = 0;
     args.flags = VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP;
     virgl_renderer_resource_create(&args, NULL, 0);
+#else
+    /*
+     * Venus-only mode: create pixman image for 2D resources.
+     * This allows software scanout for console/framebuffer without OpenGL.
+     */
+    pixman_format_code_t pformat = virtio_gpu_get_pixman_format(c2d.format);
+    if (pformat) {
+        res->base.image = pixman_image_create_bits(pformat, c2d.width, c2d.height,
+                                                   NULL, 0);
+        if (!res->base.image) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: pixman alloc failed %d\n",
+                          __func__, c2d.resource_id);
+        }
+    }
+#endif
 }
 
 static void virgl_cmd_create_resource_3d(VirtIOGPU *g,
@@ -304,8 +327,10 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
 {
     struct virtio_gpu_resource_unref unref;
     struct virtio_gpu_virgl_resource *res;
+#ifdef CONFIG_OPENGL
     struct iovec *res_iovs = NULL;
     int num_iovs = 0;
+#endif
 
     VIRTIO_GPU_FILL_CMD(unref);
     trace_virtio_gpu_cmd_res_unref(unref.resource_id);
@@ -328,6 +353,21 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
     }
 #endif
 
+#ifdef __APPLE__
+    /* Clean up blob mapped for scanout on macOS */
+    if (res->mapped_blob) {
+        virgl_renderer_resource_unmap(unref.resource_id);
+        res->mapped_blob = NULL;
+        res->mapped_size = 0;
+    }
+    /* Clean up software scanout pixman image */
+    if (res->scanout_image) {
+        pixman_image_unref(res->scanout_image);
+        res->scanout_image = NULL;
+    }
+#endif
+
+#ifdef CONFIG_OPENGL
     virgl_renderer_resource_detach_iov(unref.resource_id,
                                        &res_iovs,
                                        &num_iovs);
@@ -335,6 +375,18 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
         virtio_gpu_cleanup_mapping_iov(g, res_iovs, num_iovs);
     }
     virgl_renderer_resource_unref(unref.resource_id);
+#else
+    /* Venus-only mode: clean up QEMU-managed resources */
+    if (res->base.iov) {
+        virtio_gpu_cleanup_mapping_iov(g, res->base.iov, res->base.iov_cnt);
+        res->base.iov = NULL;
+        res->base.iov_cnt = 0;
+    }
+    if (res->base.image) {
+        pixman_image_unref(res->base.image);
+        res->base.image = NULL;
+    }
+#endif
 
     QTAILQ_REMOVE(&g->reslist, &res->base, next);
 
@@ -448,6 +500,11 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
     trace_virtio_gpu_cmd_res_flush(rf.resource_id,
                                    rf.r.width, rf.r.height, rf.r.x, rf.r.y);
 
+    /*
+     * Venus-only mode: pixel data is already in the resource's pixman image,
+     * populated by TRANSFER_TO_HOST_2D. Just trigger the display update.
+     */
+
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
         if (g->parent_obj.scanout[i].resource_id != rf.resource_id) {
             continue;
@@ -509,11 +566,11 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             d3d_tex2d);
 #else
         /*
-         * Venus-only mode without OpenGL: use QEMU's resource tracking.
-         * virglrenderer may not have the resource since vrend isn't initialized.
-         * Look up the resource in QEMU's list to verify it exists.
+         * Venus-only mode without OpenGL: software scanout using pixman.
+         * Use the pixman image created in RESOURCE_CREATE_2D for display.
          */
         struct virtio_gpu_virgl_resource *res;
+
         res = virtio_gpu_virgl_find_resource(g, ss.resource_id);
         if (!res) {
             qemu_log_mask(LOG_GUEST_ERROR,
@@ -522,13 +579,24 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
             return;
         }
+
         qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
                             ss.r.width, ss.r.height);
+
         /*
-         * No OpenGL scanout - Venus uses Vulkan rendering via MoltenVK.
-         * The bootloader display won't show but the guest can still boot.
-         * For display, use a separate virtio-gpu device.
+         * Use the resource's pixman image for display.
+         * The image is populated via TRANSFER_TO_HOST_2D commands.
          */
+        if (res->base.image) {
+            struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+            pixman_image_ref(res->base.image);
+            scanout->ds = qemu_create_displaysurface_pixman(res->base.image);
+            dpy_gfx_replace_surface(scanout->con, scanout->ds);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: resource %d has no pixman image\n",
+                          __func__, ss.resource_id);
+        }
 #endif
     } else {
         dpy_gfx_replace_surface(
@@ -575,11 +643,14 @@ static void virgl_cmd_transfer_to_host_2d(VirtIOGPU *g,
                                           struct virtio_gpu_ctrl_command *cmd)
 {
     struct virtio_gpu_transfer_to_host_2d t2d;
+#ifdef CONFIG_OPENGL
     struct virtio_gpu_box box;
+#endif
 
     VIRTIO_GPU_FILL_CMD(t2d);
     trace_virtio_gpu_cmd_res_xfer_toh_2d(t2d.resource_id);
 
+#ifdef CONFIG_OPENGL
     box.x = t2d.r.x;
     box.y = t2d.r.y;
     box.z = 0;
@@ -594,6 +665,38 @@ static void virgl_cmd_transfer_to_host_2d(VirtIOGPU *g,
                                       0,
                                       (struct virgl_box *)&box,
                                       t2d.offset, NULL, 0);
+#else
+    /*
+     * Venus-only mode: copy data from guest iov to pixman image.
+     * This handles the fbdev console transfer for software scanout.
+     */
+    struct virtio_gpu_virgl_resource *res;
+    res = virtio_gpu_virgl_find_resource(g, t2d.resource_id);
+    if (res && res->base.image && res->base.iov) {
+        uint32_t src_stride = pixman_image_get_stride(res->base.image);
+        uint32_t dst_width = pixman_image_get_width(res->base.image);
+        uint32_t dst_height = pixman_image_get_height(res->base.image);
+        uint32_t bytes_pp = PIXMAN_FORMAT_BPP(pixman_image_get_format(res->base.image)) / 8;
+        uint8_t *dst = (uint8_t *)pixman_image_get_data(res->base.image);
+
+        /* Bounds check */
+        if (t2d.r.x + t2d.r.width > dst_width ||
+            t2d.r.y + t2d.r.height > dst_height) {
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            return;
+        }
+
+        /* Copy row by row from iov to pixman image */
+        for (uint32_t y = 0; y < t2d.r.height; y++) {
+            size_t src_offset = t2d.offset + y * src_stride;
+            size_t dst_offset = (t2d.r.y + y) * src_stride + t2d.r.x * bytes_pp;
+            size_t row_bytes = t2d.r.width * bytes_pp;
+
+            iov_to_buf(res->base.iov, res->base.iov_cnt, src_offset,
+                       dst + dst_offset, row_bytes);
+        }
+    }
+#endif
 }
 
 static void virgl_cmd_transfer_to_host_3d(VirtIOGPU *g,
@@ -650,23 +753,39 @@ static void virgl_resource_attach_backing(VirtIOGPU *g,
         return;
     }
 
+#ifdef CONFIG_OPENGL
     ret = virgl_renderer_resource_attach_iov(att_rb.resource_id,
                                              res_iovs, res_niov);
-
-    if (ret != 0)
+    if (ret != 0) {
         virtio_gpu_cleanup_mapping_iov(g, res_iovs, res_niov);
+    }
+#else
+    /*
+     * Venus-only mode: store iov in resource for 2D software scanout.
+     * The iov is needed for transfer_to_host_2d to copy data to pixman image.
+     */
+    struct virtio_gpu_virgl_resource *res;
+    res = virtio_gpu_virgl_find_resource(g, att_rb.resource_id);
+    if (res) {
+        res->base.iov = res_iovs;
+        res->base.iov_cnt = res_niov;
+    } else {
+        virtio_gpu_cleanup_mapping_iov(g, res_iovs, res_niov);
+    }
+#endif
 }
 
 static void virgl_resource_detach_backing(VirtIOGPU *g,
                                           struct virtio_gpu_ctrl_command *cmd)
 {
     struct virtio_gpu_resource_detach_backing detach_rb;
-    struct iovec *res_iovs = NULL;
-    int num_iovs = 0;
 
     VIRTIO_GPU_FILL_CMD(detach_rb);
     trace_virtio_gpu_cmd_res_back_detach(detach_rb.resource_id);
 
+#ifdef CONFIG_OPENGL
+    struct iovec *res_iovs = NULL;
+    int num_iovs = 0;
     virgl_renderer_resource_detach_iov(detach_rb.resource_id,
                                        &res_iovs,
                                        &num_iovs);
@@ -674,6 +793,16 @@ static void virgl_resource_detach_backing(VirtIOGPU *g,
         return;
     }
     virtio_gpu_cleanup_mapping_iov(g, res_iovs, num_iovs);
+#else
+    /* Venus-only mode: clean up iov stored in resource */
+    struct virtio_gpu_virgl_resource *res;
+    res = virtio_gpu_virgl_find_resource(g, detach_rb.resource_id);
+    if (res && res->base.iov) {
+        virtio_gpu_cleanup_mapping_iov(g, res->base.iov, res->base.iov_cnt);
+        res->base.iov = NULL;
+        res->base.iov_cnt = 0;
+    }
+#endif
 }
 
 
@@ -947,35 +1076,53 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 
     g->parent_obj.enable = 1;
 
-    /*
-     * On macOS, dmabuf is not available. Fall back to using the blob
-     * memory pointer directly for software scanout. This works because
-     * virtio_gpu_do_set_scanout() can create a pixman surface from the
-     * blob pointer when dmabuf is unavailable.
-     */
-    if (res->base.dmabuf_fd < 0) {
 #ifdef __APPLE__
-        /* Use software scanout path with blob pointer */
-        if (!virtio_gpu_do_set_scanout(g, ss.scanout_id, &fb, &res->base,
-                                       &ss.r, &cmd->error)) {
+    /*
+     * On macOS, dmabuf is not available. Always use software scanout path
+     * via blob memory pointer. The virglrenderer patch returns an SHM fd
+     * instead of dmabuf, so dmabuf_fd may be >= 0 but it's not a real dmabuf.
+     * virtio_gpu_do_set_scanout() creates a pixman surface from the blob.
+     *
+     * We need to map the blob to get its host pointer. This is done lazily
+     * here since the guest may not have issued MAP_BLOB before SET_SCANOUT_BLOB.
+     */
+    if (!res->mapped_blob) {
+        void *data = NULL;
+        uint64_t size = 0;
+        int ret = virgl_renderer_resource_map(ss.resource_id, &data, &size);
+        if (ret || !data) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: failed to map blob resource %d: %s\n",
+                          __func__, ss.resource_id, strerror(-ret));
+            cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
             return;
         }
+        res->mapped_blob = data;
+        res->mapped_size = size;
+    }
+    /* Set the blob pointer so virtio_gpu_do_set_scanout can use it */
+    res->base.blob = res->mapped_blob;
+
+    if (!virtio_gpu_do_set_scanout(g, ss.scanout_id, &fb, &res->base,
+                                   &ss.r, &cmd->error)) {
+        return;
+    }
 #else
+    if (res->base.dmabuf_fd < 0) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: resource not backed by dmabuf %d\n",
                       __func__, ss.resource_id);
         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
         return;
-#endif
-    } else {
-        /* dmabuf path for GL-accelerated display */
-        if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
-            qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
-                          __func__);
-            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
-            return;
-        }
-        virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
     }
+    /* dmabuf path for GL-accelerated display */
+    if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
+                      __func__);
+        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+        return;
+    }
+    virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+#endif
 }
 #endif
 
