@@ -33,8 +33,8 @@ export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:
 export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/builddir/server/virgl_render_server
 
 # Venus/virgl debug (uncomment for troubleshooting)
-# export VKR_DEBUG=all
-# export MVK_CONFIG_LOG_LEVEL=2
+export VKR_DEBUG=all
+export MVK_CONFIG_LOG_LEVEL=2
 
 # Check QEMU
 if [[ ! -x "$QEMU" ]]; then
@@ -76,6 +76,8 @@ COMMON_OPTS=(
     -device qemu-xhci -device usb-kbd -device usb-tablet
     -device virtio-net-pci,netdev=net0
     -netdev user,id=net0,hostfwd=tcp::2222-:22
+    -fsdev local,id=mesa_dev,path=/opt/other/mesa,security_model=mapped-xattr
+    -device virtio-9p-pci,fsdev=mesa_dev,mount_tag=mesa_share
     -serial mon:stdio
 )
 
