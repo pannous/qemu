@@ -24,11 +24,18 @@
 #include "ui/egl-helpers.h"
 #endif
 
+#ifdef __APPLE__
+#include "virtio-gpu-iosurface.h"
+#endif
+
 #include <virglrenderer.h>
 
 struct virtio_gpu_virgl_resource {
     struct virtio_gpu_simple_resource base;
     MemoryRegion *mr;
+#ifdef __APPLE__
+    IOSurfaceRef iosurface;
+#endif
 };
 
 static struct virtio_gpu_virgl_resource *
@@ -933,35 +940,42 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
         return;
     }
-    if (res->base.dmabuf_fd < 0) {
-#ifdef __APPLE__
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "%s: resource %d not backed by dmabuf. "
-                      "Blob scanout requires dmabuf which is unavailable on macOS. "
-                      "Use non-blob scanout or disable blob resources.\n",
-                      __func__, ss.resource_id);
-#else
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: resource not backed by dmabuf %d\n",
-                      __func__, ss.resource_id);
-#endif
-        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
-        return;
-    }
-
     if (!virtio_gpu_scanout_blob_to_fb(&fb, &ss, res->base.blob_size)) {
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
         return;
     }
 
     g->parent_obj.enable = 1;
-    if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
-                      __func__);
-        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
-        return;
-    }
 
-    virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+    /*
+     * On macOS, dmabuf is not available. Fall back to using the blob
+     * memory pointer directly for software scanout. This works because
+     * virtio_gpu_do_set_scanout() can create a pixman surface from the
+     * blob pointer when dmabuf is unavailable.
+     */
+    if (res->base.dmabuf_fd < 0) {
+#ifdef __APPLE__
+        /* Use software scanout path with blob pointer */
+        if (!virtio_gpu_do_set_scanout(g, ss.scanout_id, &fb, &res->base,
+                                       &ss.r, &cmd->error)) {
+            return;
+        }
+#else
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: resource not backed by dmabuf %d\n",
+                      __func__, ss.resource_id);
+        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return;
+#endif
+    } else {
+        /* dmabuf path for GL-accelerated display */
+        if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
+                          __func__);
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            return;
+        }
+        virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+    }
 }
 #endif
 

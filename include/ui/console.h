@@ -141,6 +141,11 @@ typedef struct ScanoutTexture {
     uint32_t width;
     uint32_t height;
     void *d3d_tex2d;
+#ifdef __APPLE__
+    void *iosurface;      /* IOSurfaceRef for macOS scanout */
+    uint32_t iosurface_stride;
+    uint32_t iosurface_format;  /* pixman format code */
+#endif
 } ScanoutTexture;
 
 typedef struct QemuUIInfo {

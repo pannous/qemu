@@ -369,6 +369,12 @@ void virtio_gpu_update_scanout(VirtIOGPU *g,
                                struct virtio_gpu_simple_resource *res,
                                struct virtio_gpu_framebuffer *fb,
                                struct virtio_gpu_rect *r);
+bool virtio_gpu_do_set_scanout(VirtIOGPU *g,
+                               uint32_t scanout_id,
+                               struct virtio_gpu_framebuffer *fb,
+                               struct virtio_gpu_simple_resource *res,
+                               struct virtio_gpu_rect *r,
+                               uint32_t *error);
 void virtio_gpu_disable_scanout(VirtIOGPU *g, int scanout_id);
 
 /* virtio-gpu-3d.c */
