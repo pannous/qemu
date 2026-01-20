@@ -169,6 +169,52 @@ vulkaninfo | grep "Virtio-GPU Venus"
 /tmp/test_blob
 ```
 
+## Debug Logging (Added 2026-01-20)
+
+Debug logging has been added to `/opt/other/virglrenderer/src/venus/vkr_queue.c`:
+
+| Function | What it logs |
+|----------|--------------|
+| `vkr_dispatch_vkGetDeviceQueue` | ERROR if called - guest must use vkGetDeviceQueue2 |
+| `vkr_dispatch_vkGetDeviceQueue2` | family/idx/flags, success/failure, ring_idx, host_queue |
+| `vkr_dispatch_vkCreateFence` | guest_id, host_fence handle, return value |
+| `vkr_dispatch_vkQueueSubmit` | submitCount, guest_fence, host_fence, return value |
+| `vkr_dispatch_vkWaitForFences` | fenceCount, timeout, host_fence, return value |
+
+### Running with Debug Output
+
+```bash
+# Run the VM - debug output goes to terminal
+./scripts/run-alpine.sh
+
+# In guest, trigger queue submission:
+# (run your test that does vkQueueSubmit with fence)
+
+# Watch host terminal for [VKR] prefixed messages
+```
+
+### Expected Debug Output (working case)
+
+```
+[VKR] vkGetDeviceQueue2: family=0 idx=0 flags=0
+[VKR] vkGetDeviceQueue2: SUCCESS ring_idx=1 host_queue=0x...
+[VKR] vkCreateFence: guest_id=123 host_fence=0x... ret=0
+[VKR] vkQueueSubmit: submitCount=1 guest_fence=0x... host_fence=0x...
+[VKR] vkQueueSubmit: ret=0
+[VKR] vkWaitForFences: fenceCount=1 timeout=1000000000
+[VKR] vkWaitForFences: host_fence=0x... calling MoltenVK...
+[VKR] vkWaitForFences: ret=0  # SUCCESS
+```
+
+### If Error (context fatal)
+
+```
+[VKR] ERROR: vkGetDeviceQueue called (family=0 idx=0) - SETTING FATAL!
+[VKR] Guest driver must use vkGetDeviceQueue2 with VkDeviceQueueTimelineInfoMESA
+```
+
+This indicates the guest driver is using the wrong API.
+
 ## Environment
 
 ```bash
