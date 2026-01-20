@@ -1,11 +1,33 @@
-# Venus Hang Investigation - 2026-01-19
+# Venus Hang Investigation - 2026-01-19 (Updated 2026-01-20)
 
-                                                                                                            
-  Issue 1: HVF 16KB Page Alignment (FIXED)                                                                                   
-                                                                                                                             
-  - macOS Apple Silicon uses 16KB pages, guest uses 4KB                                                                      
-  - HVF silently fails to map non-16KB-aligned blob memory                                                                   
-  - Workaround: Using TCG instead of HVF fixes this                                                                          
+## STATUS: DISPLAY WORKING with HVF
+
+The virtio-gpu console display now works on macOS with Venus and HVF.
+
+### Solution: Software Scanout for Venus-only Mode
+
+When CONFIG_OPENGL is not defined, virtio-gpu-virgl now handles 2D resource
+commands locally without calling virglrenderer:
+
+- RESOURCE_CREATE_2D: Create pixman images for framebuffer resources
+- RESOURCE_ATTACH_BACKING: Store iov in QEMU resource (not virglrenderer)
+- TRANSFER_TO_HOST_2D: Copy data from guest iov to pixman image
+- SET_SCANOUT: Use resource's pixman image for display output
+- RESOURCE_DETACH_BACKING/UNREF: Proper cleanup
+
+This enables the Linux fbdev console to work for boot display and login.
+
+---
+
+## Original Investigation Notes
+
+
+  Issue 1: HVF 16KB Page Alignment (FIXED)
+
+  - macOS Apple Silicon uses 16KB pages, guest uses 4KB
+  - HVF silently fails to map non-16KB-aligned blob memory
+  - Workaround: Using TCG instead of HVF fixes this
+  - Now mitigated by software scanout which doesn't need blob mapping for 2D                                                                          
                                                                                                                              
   Issue 2: VK_KHR_external_memory_fd Requirement (BLOCKING)                                                                  
                                                                                                                              
