@@ -23,6 +23,9 @@ export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/Mo
 # Note: May need symlink: ln -sf /opt/homebrew/lib/libvulkan.dylib /opt/homebrew/lib/libvulkan.so
 export DYLD_LIBRARY_PATH=/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
+# Use custom virglrenderer render_server from build directory (not installed)
+export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/build/server/virgl_render_server
+
 # Venus/virgl debug (uncomment for troubleshooting)
 # export VKR_DEBUG=all
 # export MVK_CONFIG_LOG_LEVEL=2
@@ -51,8 +54,17 @@ MODE="${1:-run}"
 
 # Common options for Venus dual-GPU
 # IMPORTANT: Venus device FIRST so it becomes renderD128 (Mesa opens renderD128 first)
+# Use TCG for now - HVF has 16KB page alignment issues with 4KB blob allocations
+# HVF silently fails to map non-16KB-aligned memory regions
+ACCEL="${QEMU_ACCEL:-tcg}"
+if [[ "$ACCEL" == "hvf" ]]; then
+    ACCEL_OPTS="-accel hvf -cpu host"
+else
+    ACCEL_OPTS="-accel tcg -cpu max"
+fi
+
 COMMON_OPTS=(
-    -M virt -accel hvf -cpu host -m 2G -smp 4
+    -M virt $ACCEL_OPTS -m 2G -smp 4
     -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M
     -display cocoa
     -device qemu-xhci -device usb-kbd -device usb-tablet
