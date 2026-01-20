@@ -277,6 +277,7 @@ VirtIOGPUVkSwapchain *virtio_gpu_vk_swapchain_create(void *metal_layer,
     const char *instance_extensions[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_EXT_METAL_SURFACE_EXTENSION_NAME,
+        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
     };
 
     VkApplicationInfo app_info = {
@@ -290,6 +291,7 @@ VirtIOGPUVkSwapchain *virtio_gpu_vk_swapchain_create(void *metal_layer,
 
     VkInstanceCreateInfo instance_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = ARRAY_SIZE(instance_extensions),
         .ppEnabledExtensionNames = instance_extensions,
@@ -350,6 +352,7 @@ VirtIOGPUVkSwapchain *virtio_gpu_vk_swapchain_create(void *metal_layer,
 
     const char *device_extensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        "VK_KHR_portability_subset",
     };
 
     VkDeviceCreateInfo device_info = {
