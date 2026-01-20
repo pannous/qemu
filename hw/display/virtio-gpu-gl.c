@@ -179,6 +179,16 @@ static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)
         virgl_renderer_cleanup(NULL);
     }
 
+#ifdef __APPLE__
+    /* Clean up Vulkan swapchain */
+    if (gl->vk_swapchain) {
+        /* Forward declaration - implemented in virtio-gpu-virgl.c */
+        extern void virtio_gpu_vk_swapchain_destroy(struct VirtIOGPUVkSwapchain *);
+        virtio_gpu_vk_swapchain_destroy(gl->vk_swapchain);
+        gl->vk_swapchain = NULL;
+    }
+#endif
+
     gl->renderer_state = RS_START;
 
     g_array_unref(g->capset_ids);

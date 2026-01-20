@@ -91,6 +91,16 @@ if config_all_devices.has_key('CONFIG_VIRTIO_GPU')
     virtio_gpu_gl_ss = ss.source_set()
     virtio_gpu_gl_ss.add(when: ['CONFIG_VIRTIO_GPU', virgl],
                          if_true: [files('virtio-gpu-gl.c', 'virtio-gpu-virgl.c'), pixman, virgl])
+    # macOS: add host Vulkan swapchain for Venus presentation
+    if host_os == 'darwin'
+      vulkan_dep = dependency('vulkan', required: false)
+      metal_dep = dependency('appleframeworks', modules: ['Metal', 'QuartzCore'])
+      if vulkan_dep.found()
+        virtio_gpu_gl_ss.add(files('virtio-gpu-vk-swapchain.m'))
+        virtio_gpu_gl_ss.add(vulkan_dep)
+        virtio_gpu_gl_ss.add(metal_dep)
+      endif
+    endif
     hw_display_modules += {'virtio-gpu-gl': virtio_gpu_gl_ss}
   endif
 

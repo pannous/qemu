@@ -63,8 +63,125 @@ MoltenVK (1.4+) supports Vulkan 1.4 with known limitations:
 
 See: https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Runtime_UserGuide.md
 
+## Unix Domain Socket Communication
+**Status: Fixed**
+
+### Issue
+macOS doesn't support `SOCK_SEQPACKET` for Unix domain sockets. virglrenderer uses `SOCK_SEQPACKET` because it preserves message boundaries (each `send()` corresponds to one `recv()`). With `SOCK_STREAM`, message boundaries are lost and messages can concatenate.
+
+### Symptoms
+- "invalid request size (48) or fd count (1) for context op 1" errors
+- Messages arriving with wrong sizes due to boundary loss
+- "Bad file descriptor" errors on render_server startup
+
+### Implemented Fixes
+1. **Message framing protocol**: Added 8-byte length-prefix header for macOS:
+   ```c
+   struct stream_msg_header {
+      uint32_t size;      /* payload size */
+      uint32_t fd_count;  /* number of fds attached */
+   };
+   ```
+   Applied to both `src/proxy/proxy_socket.c` and `server/render_socket.c`
+
+2. **CLOEXEC fix**: Only set CLOEXEC on parent's socket fd (fd[0]), not the child's (fd[1]).
+   The render_server receives fd[1] via exec, so it must NOT have CLOEXEC set.
+
+3. **fd_count initialization**: Fixed early initialization to 0 before any error paths.
+
+### Files Modified (virglrenderer)
+- `src/proxy/proxy_socket.c` - Proxy-side (QEMU process) framing + CLOEXEC fix
+- `server/render_socket.c` - Server-side framing
+- `server/render_common.c` - macOS stderr logging
+
+## Portability Enumeration
+**Status: Fixed**
+
+### Issue
+MoltenVK requires `VK_KHR_portability_enumeration` extension and the `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` flag during instance creation. Without these, the Vulkan loader doesn't enumerate MoltenVK physical devices.
+
+### Symptoms
+- `vkCreateInstance` returns `VK_ERROR_INCOMPATIBLE_DRIVER` (-9)
+- "Found no drivers!" error from Vulkan loader
+
+### Fix
+Added conditional code in `vkr_instance.c` for macOS:
+```c
+#ifdef __APPLE__
+   ext_names[ext_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+   create_info->flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+```
+
+### Result
+Venus now successfully detects MoltenVK and exposes:
+- Device: Virtio-GPU Venus (Apple M2 Pro)
+- Vulkan API: 1.2.0
+- Driver: Mesa Venus 25.2.7
+
+## Swapchain / Display - Host-Side Vulkan Swapchain
+**Status: Implemented**
+
+### Solution Architecture
+Instead of modifying guest Mesa to expose `VK_KHR_swapchain`, we implemented host-side Vulkan swapchain in QEMU. This intercepts blob scanout commands and presents via a host-managed swapchain.
+
+```
+Guest Vulkan App (renders to blob)
+    ↓ SET_SCANOUT_BLOB
+QEMU virtio-gpu-virgl.c (intercept scanout)
+    ↓
+Host Vulkan Swapchain (MoltenVK)
+    ↓ IOSurface bridge
+CAMetalLayer (cocoa.m)
+    ↓
+macOS Display
+```
+
+### Key Insight
+Rather than adding swapchain commands to the Venus protocol (which would require complex Mesa changes), we intercept at the existing virtio-gpu scanout level where blob frames are already received.
+
+### Implementation Files
+| File | Purpose |
+|------|---------|
+| `ui/cocoa.m` | Added CAMetalLayer to QemuCocoaView |
+| `hw/display/virtio-gpu-vk-swapchain.m` | **NEW** - Host Vulkan swapchain via MoltenVK |
+| `hw/display/virtio-gpu-vk-swapchain.h` | **NEW** - Header file |
+| `hw/display/virtio-gpu-virgl.c` | Integrated swapchain in `virgl_cmd_set_scanout_blob()` |
+| `include/hw/virtio/virtio-gpu.h` | Added `vk_swapchain` to VirtIOGPUGL struct |
+| `hw/display/meson.build` | Added new source files |
+| `meson.build` | Added Metal framework to cocoa dependency |
+
+### How It Works
+1. **Initialization** (`virtio_gpu_virgl_init`):
+   - Get CAMetalLayer from Cocoa display
+   - Create Vulkan instance with VK_EXT_metal_surface
+   - Create VkSurfaceKHR from Metal layer
+   - Create VkSwapchainKHR with BGRA8 format
+   - Enable Metal layer visibility
+
+2. **Presentation** (`virgl_cmd_set_scanout_blob`):
+   - Map blob resource to get host pointer
+   - Acquire swapchain image
+   - Copy blob data to staging buffer
+   - Blit staging buffer → swapchain image
+   - Present via `vkQueuePresentKHR`
+
+3. **Fallback**: If Vulkan swapchain fails, falls back to software scanout via pixman
+
+### What Works
+- `vkCreateInstance` ✓
+- `vkCreateDevice` ✓
+- `vkAllocateMemory` ✓
+- Compute shaders ✓
+- All non-WSI Vulkan operations ✓
+- **Blob scanout via host Vulkan swapchain** ✓ (NEW)
+
+### Known Limitations
+- Single display output only (no multi-monitor)
+- Host swapchain format fixed to BGRA8
+- VSync via CAMetalLayer display link
+
 ## Future Work
-To fully support blob scanout on macOS would require:
-1. IOSurface-based alternative to dmabuf
-2. Integration with virglrenderer macOS support
-3. Significant architectural changes
+- Multi-display support
+- HDR/wide color gamut
+- Zero-copy via IOSurface-Vulkan interop (currently uses staging buffer copy)

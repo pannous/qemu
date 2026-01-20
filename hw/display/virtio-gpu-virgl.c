@@ -26,6 +26,11 @@
 
 #ifdef __APPLE__
 #include "virtio-gpu-iosurface.h"
+#include "virtio-gpu-vk-swapchain.h"
+
+/* Cocoa display exports for Metal layer access */
+extern void *cocoa_get_metal_layer(void);
+extern void cocoa_set_metal_layer_enabled(bool enabled);
 #endif
 
 #include <virglrenderer.h>
@@ -1078,10 +1083,8 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 
 #ifdef __APPLE__
     /*
-     * On macOS, dmabuf is not available. Always use software scanout path
-     * via blob memory pointer. The virglrenderer patch returns an SHM fd
-     * instead of dmabuf, so dmabuf_fd may be >= 0 but it's not a real dmabuf.
-     * virtio_gpu_do_set_scanout() creates a pixman surface from the blob.
+     * On macOS, dmabuf is not available. We use a host-side Vulkan swapchain
+     * for presentation when Venus is enabled, with fallback to software scanout.
      *
      * We need to map the blob to get its host pointer. This is done lazily
      * here since the guest may not have issued MAP_BLOB before SET_SCANOUT_BLOB.
@@ -1100,7 +1103,30 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         res->mapped_blob = data;
         res->mapped_size = size;
     }
-    /* Set the blob pointer so virtio_gpu_do_set_scanout can use it */
+
+    /*
+     * Try to present via host Vulkan swapchain if available.
+     * This provides better performance for Venus rendering.
+     */
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+        /* Resize swapchain if dimensions changed */
+        uint32_t sw_width, sw_height;
+        virtio_gpu_vk_swapchain_get_size(gl->vk_swapchain, &sw_width, &sw_height);
+        if (sw_width != fb.width || sw_height != fb.height) {
+            virtio_gpu_vk_swapchain_resize(gl->vk_swapchain, fb.width, fb.height);
+        }
+
+        /* Present the blob via Vulkan swapchain */
+        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, res->mapped_blob, &fb)) {
+            /* Update scanout state for tracking */
+            g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+            return;
+        }
+        /* Fall through to software path on swapchain failure */
+    }
+
+    /* Fallback: software scanout via pixman */
     res->base.blob = res->mapped_blob;
 
     if (!virtio_gpu_do_set_scanout(g, ss.scanout_id, &fb, &res->base,
@@ -1434,6 +1460,16 @@ void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g)
         dpy_gl_scanout_disable(g->parent_obj.scanout[i].con);
 #endif
     }
+
+#ifdef __APPLE__
+    /* Destroy Vulkan swapchain on reset */
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    if (gl->vk_swapchain) {
+        virtio_gpu_vk_swapchain_destroy(gl->vk_swapchain);
+        gl->vk_swapchain = NULL;
+        cocoa_set_metal_layer_enabled(false);
+    }
+#endif
 }
 
 void virtio_gpu_virgl_reset(VirtIOGPU *g)
@@ -1532,6 +1568,34 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
     gl->cmdq_resume_bh = aio_bh_new(qemu_get_aio_context(),
                                     virtio_gpu_virgl_resume_cmdq_bh,
                                     g);
+#endif
+
+#ifdef __APPLE__
+    /*
+     * Initialize host-side Vulkan swapchain for Venus blob presentation.
+     * This allows Venus to render to blobs and have QEMU present them
+     * via a host Vulkan swapchain without guest swapchain support.
+     */
+    if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+        void *metal_layer = cocoa_get_metal_layer();
+        if (metal_layer) {
+            uint32_t width = g->parent_obj.conf.xres;
+            uint32_t height = g->parent_obj.conf.yres;
+
+            gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                               width, height);
+            if (gl->vk_swapchain) {
+                cocoa_set_metal_layer_enabled(true);
+                info_report("Venus: Host Vulkan swapchain initialized (%dx%d)",
+                            width, height);
+            } else {
+                warn_report("Venus: Failed to create host Vulkan swapchain, "
+                            "falling back to software scanout");
+            }
+        } else {
+            info_report("Venus: No Metal layer available, using software scanout");
+        }
+    }
 #endif
 
     return 0;
