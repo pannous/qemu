@@ -47,10 +47,25 @@ This suggests either:
 
 | Test | Result |
 |------|--------|
-| DRM dumb buffer → CRTC | ✅ Works |
+| DRM dumb buffer → CRTC | ✅ Works (red screen) |
+| GBM buffer → CRTC | ✅ Works (gradient) |
 | X11 + vkcube | ❌ Missing VK_KHR_swapchain |
 | Vulkan device enumeration | ✅ "Virtio-GPU Venus (Apple M2 Pro)" |
 | Vulkan fence + VN_PERF | ✅ Works with workaround |
+
+## Test Commands
+
+```bash
+# In Alpine guest:
+# Kill X first to get DRM master
+kill -9 $(pgrep Xorg) 2>/dev/null
+
+# DRM dumb buffer test (shows red)
+/tmp/test_drm
+
+# GBM buffer test (shows green-blue gradient)
+/tmp/test_gbm
+```
 
 ## Next Steps
 
