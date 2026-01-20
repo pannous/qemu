@@ -373,6 +373,64 @@ command buffer with vkCmdFillBuffer, submits and verifies results.
 6. [ ] Handle fence/semaphore fd extensions similarly if needed
 7. [ ] Submit upstream patch
 
+### Display Testing Results (2026-01-20)
+
+**Tested Capabilities:**
+
+| Test | Result | Notes |
+|------|--------|-------|
+| Vulkan device enumeration | ✅ Works | "Virtio-GPU Venus (Apple M2 Pro)" |
+| Headless surface | ✅ Works | VK_EXT_headless_surface functional |
+| Render pass creation | ✅ Works | Graphics pipelines create successfully |
+| Framebuffer rendering | ✅ Works | Can clear framebuffer with color |
+| Command submission | ✅ Works | vkQueueSubmit + fence wait succeeds |
+| Wayland surface creation | ✅ Works | 16 surface formats available |
+| VK_KHR_swapchain | ❌ Missing | Venus doesn't expose swapchain extension |
+| Direct display (VK_KHR_display) | ⚠️ Partial | Extension available but not fully functional |
+
+**Key Findings:**
+
+1. **Venus can render graphics** - Render passes, framebuffers, and command submission all work
+2. **No direct WSI presentation** - VK_KHR_swapchain is not exposed because Venus uses virtio-gpu DMA for presentation, not direct Vulkan WSI
+3. **Presentation path** - Content must go: Vulkan render → virtio-gpu blob → host compositor → display
+4. **HVF incompatibility** - HVF requires 16KB page alignment; Venus blob allocations are 4KB aligned, causing silent mapping failures. TCG required.
+5. **TCG performance** - TCG emulation is too slow for interactive use (SSH timeouts during banner exchange)
+
+**Architecture Diagram:**
+```
+Guest (Venus Mesa driver)
+    ↓ Vulkan commands via virtio-gpu ring buffer
+Host (virglrenderer with VK_EXT_external_memory_host patch)
+    ↓ VkImportMemoryHostPointerInfoEXT
+MoltenVK
+    ↓ Metal commands
+macOS GPU (Apple M2 Pro)
+    ↓ Rendered image in blob memory
+virtio-gpu scanout
+    ↓ DRM framebuffer
+Host display (Cocoa window)
+```
+
+**Why Swapchain Doesn't Work:**
+
+Venus was designed for Linux virtualization where:
+- Guest renders to Vulkan image
+- Image is shared via virtio-gpu blob (using fd-based memory sharing)
+- Host compositor presents the image
+
+On macOS:
+- ✅ We patched virglrenderer to use VK_EXT_external_memory_host instead of fd
+- ✅ Vulkan rendering works through the patched path
+- ❌ VK_KHR_swapchain requires integration with window system (Wayland/X11)
+- ❌ Venus doesn't implement swapchain because it's designed for offscreen rendering
+
+**Potential Swapchain Solutions:**
+
+1. **Zink path** - Use Zink (OpenGL over Vulkan) + Venus + virgl for GL apps
+2. **virtio-gpu scanout** - Render to blob, use virtio-gpu DRM scanout (current partial support)
+3. **Custom swapchain** - Implement VK_KHR_swapchain in Venus that uses blob export (complex)
+4. **Direct display** - Implement VK_KHR_display scanout through virtio-gpu planes
+
 ### Git Commits (virglrenderer)
 
 1. `26e3a411` - feature(major): Add VK_EXT_external_memory_host fallback for macOS/MoltenVK
@@ -390,6 +448,53 @@ command buffer with vkCmdFillBuffer, submits and verifies results.
 **Build Notes**:
 - Configure with: `meson configure builddir -Drender-server-worker=process`
 - macOS lacks C11 threads.h, so thread workers aren't supported
+
+### QEMU IOSurface Scanout Infrastructure (2026-01-20)
+
+**Goal**: Add IOSurface-based display support for Venus on macOS.
+
+**Background**:
+- Linux uses dmabuf for zero-copy buffer sharing between GPU and display
+- macOS uses IOSurface instead
+- QEMU's virtio-gpu scanout requires dmabuf on Linux; needs alternative on macOS
+
+**Implementation Status**:
+
+1. **IOSurface helper functions** (`hw/display/virtio-gpu-iosurface.m/h`):
+   - `virtio_gpu_create_iosurface()` - Create IOSurface from blob dimensions
+   - `virtio_gpu_update_iosurface()` - Copy blob pixels to IOSurface
+   - `virtio_gpu_release_iosurface()` - Release IOSurface
+   - Uses pure CoreFoundation APIs (no Objective-C literals)
+
+2. **Software scanout fallback** (`hw/display/virtio-gpu-virgl.c`):
+   - Exported `virtio_gpu_do_set_scanout()` for reuse
+   - macOS path creates pixman surface from blob memory
+   - Works with existing cocoa display via `dpy_gfx_replace_surface`
+
+3. **Display infrastructure** (`include/ui/console.h`):
+   - Added `iosurface` field to `ScanoutTexture` for future optimization
+   - Ready for CALayer/Metal integration in cocoa.m
+
+**Files Changed (QEMU)**:
+- `hw/display/virtio-gpu-iosurface.m` (new)
+- `hw/display/virtio-gpu-iosurface.h` (new)
+- `hw/display/meson.build` - Added IOSurface build on macOS
+- `hw/display/virtio-gpu-virgl.c` - Enabled software scanout fallback
+- `hw/display/virtio-gpu.c` - Exported `virtio_gpu_do_set_scanout()`
+- `include/hw/virtio/virtio-gpu.h` - Added function declaration
+- `include/ui/console.h` - Added IOSurface field to ScanoutTexture
+
+**Current State**:
+- Venus can render to blobs ✅
+- Software scanout creates pixman surfaces from blob memory ✅
+- Display works through existing cocoa path ✅
+- IOSurface infrastructure ready for future zero-copy optimization ⏳
+
+**Future Optimization**:
+To achieve zero-copy display, would need:
+1. virglrenderer to allocate Vulkan memory backed by IOSurface
+2. cocoa.m to use CALayer with IOSurface directly
+3. This would eliminate the pixel copy in current software path
 
 ---
 
