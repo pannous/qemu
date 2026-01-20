@@ -224,6 +224,39 @@ write OK!
 ### Commits
 - virglrenderer: `0b3d075a` - fix: Allow SHM blob size >= expected for alignment padding
 
+## Blob Scanout Test
+**Status: Working (2026-01-20)**
+
+### Test: GBM + Vulkan + DRM Scanout
+```
+$ /tmp/test_blob
+Display: 1280x800
+GBM BO: stride=5120, prime_fd=6
+FB: 42
+Vulkan: Virtio-GPU Venus (Apple M2 Pro)
+Vulkan: rendered 1280x800 blue
+Copied to GBM buffer
+Setting mode...
+Blue screen for 3s...
+Done!
+```
+
+### What This Proves
+1. **Venus Vulkan rendering**: Used "Virtio-GPU Venus (Apple M2 Pro)" device
+2. **HOST_VISIBLE memory mapping**: vkMapMemory works for data transfer
+3. **GBM blob resource**: Created via `gbm_bo_create()` with SCANOUT flag
+4. **DRM blob scanout**: `drmModeSetCrtc()` triggered SET_SCANOUT_BLOB path
+5. **Display output**: Blue screen displayed for 3 seconds
+
+### Flow
+```
+Guest: Vulkan (Venus) → HOST_VISIBLE buffer → GBM buffer → DRM scanout
+                                                    ↓
+                                            SET_SCANOUT_BLOB
+                                                    ↓
+Host: virtio-gpu-virgl.c → Host Vulkan swapchain → CAMetalLayer
+```
+
 ## Future Work
 - Multi-display support
 - HDR/wide color gamut
