@@ -241,6 +241,11 @@ typedef enum {
     RS_RESET,       /* inited and reset pending, moves to start after reset */
 } RenderState;
 
+/* Forward declaration for macOS Vulkan swapchain */
+#ifdef __APPLE__
+struct VirtIOGPUVkSwapchain;
+#endif
+
 struct VirtIOGPUGL {
     struct VirtIOGPU parent_obj;
 
@@ -250,6 +255,11 @@ struct VirtIOGPUGL {
     QEMUTimer *print_stats;
 
     QEMUBH *cmdq_resume_bh;
+
+#ifdef __APPLE__
+    /* Host-side Vulkan swapchain for Venus blob presentation on macOS */
+    struct VirtIOGPUVkSwapchain *vk_swapchain;
+#endif
 };
 
 struct VhostUserGPU {

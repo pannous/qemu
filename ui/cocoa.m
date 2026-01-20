@@ -26,6 +26,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Metal/Metal.h>
 #include <crt_externs.h>
 
 #include "qemu/help-texts.h"
@@ -321,6 +322,8 @@ static void handleAnyDeviceErrors(Error * err)
     int mouseX;
     int mouseY;
     bool mouseOn;
+    /* Metal layer for Vulkan swapchain presentation (Venus) */
+    CAMetalLayer *metalLayer;
 }
 - (void) switchSurface:(pixman_image_t *)image;
 - (void) grabMouse;
@@ -333,6 +336,7 @@ static void handleAnyDeviceErrors(Error * err)
 - (BOOL) isMouseGrabbed;
 - (QEMUScreen) gscreen;
 - (void) raiseAllKeys;
+- (CAMetalLayer *) metalLayer;
 @end
 
 QemuCocoaView *cocoaView;
@@ -384,6 +388,17 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
                                          kCALayerMinYMargin];
         [[self layer] addSublayer:cursorLayer];
 
+        /* Create Metal layer for Vulkan swapchain presentation */
+        metalLayer = [[CAMetalLayer alloc] init];
+        metalLayer.device = MTLCreateSystemDefaultDevice();
+        metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        metalLayer.framebufferOnly = NO;
+        metalLayer.frame = self.layer.bounds;
+        metalLayer.contentsScale = [[NSScreen mainScreen] backingScaleFactor];
+        metalLayer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        /* Hidden by default - enabled when Vulkan swapchain is initialized */
+        metalLayer.hidden = YES;
+        [[self layer] insertSublayer:metalLayer atIndex:0];
     }
     return self;
 }
@@ -402,6 +417,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
     CGColorSpaceRelease(colorspace);
     [cursorLayer release];
+    [metalLayer release];
     cursor_unref(cursor);
     [super dealloc];
 }
@@ -634,6 +650,12 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         [[self window] center];
     } else {
         [[self window] setContentSize:[self fixAspectRatio:[self frame].size]];
+    }
+
+    /* Update Metal layer frame to match view */
+    if (metalLayer) {
+        metalLayer.frame = self.layer.bounds;
+        metalLayer.drawableSize = CGSizeMake(screen.width, screen.height);
     }
 }
 
@@ -1225,6 +1247,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 }
 - (BOOL) isMouseGrabbed {return isMouseGrabbed;}
 - (QEMUScreen) gscreen {return screen;}
+- (CAMetalLayer *) metalLayer {return metalLayer;}
 
 /*
  * Makes the target think all down keys are being released.
@@ -2168,6 +2191,37 @@ static QemuDisplay qemu_display_cocoa = {
     .type       = DISPLAY_TYPE_COCOA,
     .init       = cocoa_display_init,
 };
+
+/*
+ * Get the CAMetalLayer for Vulkan swapchain presentation.
+ * Used by the host-side Vulkan swapchain to create a VkSurfaceKHR.
+ * Returns NULL if the Cocoa display is not initialized.
+ */
+void *cocoa_get_metal_layer(void)
+{
+    if (!cocoaView) {
+        return NULL;
+    }
+    return (__bridge void *)[cocoaView metalLayer];
+}
+
+/*
+ * Enable or disable the Metal layer for Vulkan presentation.
+ * When enabled, the Metal layer becomes visible and CoreGraphics
+ * rendering is bypassed for Vulkan content.
+ */
+void cocoa_set_metal_layer_enabled(bool enabled)
+{
+    if (!cocoaView) {
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CAMetalLayer *layer = [cocoaView metalLayer];
+        if (layer) {
+            layer.hidden = !enabled;
+        }
+    });
+}
 
 static void register_cocoa(void)
 {
