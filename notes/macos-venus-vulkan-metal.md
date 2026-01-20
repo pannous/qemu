@@ -576,3 +576,17 @@ QEMU already has IOSurface integration in apple-gfx-mmio.m that we can reference
      Simpler - read pixels from Metal to CPU for display. Gets it working first.                                             
   2. Phase 2: IOSurface zero-copy                                                                                            
      Optimal performance but requires virglrenderer fork/changes.  
+## Venus Project Structure
+
+Venus is NOT a separate repository. It was developed by Google for Chrome OS/Android virtualization and contributed directly to virglrenderer.
+
+**Authoritative sources:**
+- **virglrenderer** (host-side code): https://gitlab.freedesktop.org/virgl/virglrenderer (`src/venus/`)
+- **Mesa** (guest-side driver): https://gitlab.freedesktop.org/mesa/mesa (`src/virtio/vulkan/`)
+- **venus-protocol** (wire protocol definitions): https://gitlab.freedesktop.org/virgl/venus-protocol
+
+**Architecture:**
+- Guest: Mesa's `virtio-gpu` Vulkan driver sends Vulkan commands
+- Host: virglrenderer's `src/venus/` receives and executes them via host Vulkan (MoltenVK on macOS)
+
+Our fork: https://github.com/pannous/virglrenderer (with macOS-specific fixes)
