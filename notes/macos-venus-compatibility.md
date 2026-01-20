@@ -189,6 +189,41 @@ Without these, `vkCreateInstance` returns `VK_ERROR_INCOMPATIBLE_DRIVER` (-9).
 - Host swapchain format fixed to BGRA8
 - VSync via CAMetalLayer display link
 
+## HOST_VISIBLE Memory Mapping - VK_EXT_external_memory_host
+**Status: Fixed (2026-01-20)**
+
+### Problem
+vkMapMemory on HOST_VISIBLE memory failed with VK_ERROR_MEMORY_MAP_FAILED (-5).
+
+### Root Cause
+Two issues in virglrenderer:
+1. **No fd export mechanism on macOS**: MoltenVK doesn't support `VK_KHR_external_memory_fd` or `VK_EXT_external_memory_dma_buf`, which Venus uses for blob memory sharing.
+2. **SHM size validation too strict**: Proxy rejected aligned SHM allocations.
+
+### Solution (in virglrenderer)
+1. **VK_EXT_external_memory_host fallback path** (`vkr_device_memory.c`):
+   - Detect when fd export unavailable but host pointer import available
+   - Create SHM file via `os_create_anonymous_file()`
+   - mmap the SHM to get a host pointer
+   - Import as Vulkan memory via `VkImportMemoryHostPointerInfoEXT`
+   - Align to 16KB (`minImportedHostPointerAlignment` on macOS)
+   - Export blob with `VIRGL_RESOURCE_FD_SHM` type
+
+2. **Fixed SHM validation** (`proxy_context.c`):
+   - Changed `size != expected_size` to `size < expected_size`
+   - Allows alignment padding (16KB) beyond requested size (e.g., 4KB)
+
+### Verification
+```
+$ /tmp/test_mem
+vkAllocateMemory: 0
+vkMapMemory: 0 ptr=0xffffb3fbc000
+write OK!
+```
+
+### Commits
+- virglrenderer: `0b3d075a` - fix: Allow SHM blob size >= expected for alignment padding
+
 ## Future Work
 - Multi-display support
 - HDR/wide color gamut
