@@ -70,6 +70,11 @@ if config_all_devices.has_key('CONFIG_VIRTIO_GPU')
                     if_true: [files('virtio-gpu-base.c', 'virtio-gpu.c'), pixman])
   if host_os == 'linux'
     virtio_gpu_ss.add(files('virtio-gpu-udmabuf.c'))
+  elif host_os == 'darwin'
+    # macOS: use IOSurface instead of udmabuf
+    iosurface_dep = dependency('appleframeworks', modules: ['IOSurface', 'CoreFoundation'])
+    virtio_gpu_ss.add(files('virtio-gpu-udmabuf-stubs.c', 'virtio-gpu-iosurface.m'))
+    virtio_gpu_ss.add(iosurface_dep)
   else
     virtio_gpu_ss.add(files('virtio-gpu-udmabuf-stubs.c'))
   endif
