@@ -176,6 +176,14 @@ Rather than adding swapchain commands to the Venus protocol (which would require
 - All non-WSI Vulkan operations ✓
 - **Blob scanout via host Vulkan swapchain** ✓ (NEW)
 
+### MoltenVK Portability Extensions
+Required for host swapchain to work with MoltenVK:
+- Instance extension: `VK_KHR_portability_enumeration`
+- Instance flag: `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`
+- Device extension: `VK_KHR_portability_subset`
+
+Without these, `vkCreateInstance` returns `VK_ERROR_INCOMPATIBLE_DRIVER` (-9).
+
 ### Known Limitations
 - Single display output only (no multi-monitor)
 - Host swapchain format fixed to BGRA8
