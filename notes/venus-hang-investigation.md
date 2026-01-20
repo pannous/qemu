@@ -369,8 +369,8 @@ command buffer with vkCmdFillBuffer, submits and verifies results.
 2. [x] Shader compilation and pipeline creation
 3. [x] Fix blob resource operations for command submission (device memory export)
 4. [x] Clean up debug prints
-5. [ ] Handle fence/semaphore fd extensions similarly if needed
-6. [ ] Recreate macOS socket compatibility layer for render server (SOCK_STREAM, signalfd)
+5. [x] macOS socket compatibility layer for render server (SOCK_STREAM, signalfd)
+6. [ ] Handle fence/semaphore fd extensions similarly if needed
 7. [ ] Submit upstream patch
 
 ### Git Commits (virglrenderer)
@@ -383,9 +383,13 @@ command buffer with vkCmdFillBuffer, submits and verifies results.
    - Files: vkr_device_memory.c/h
    - SHM allocation, mmap import, blob export
 
-**Note**: macOS build also requires compatibility patches for render server (SOCK_CLOEXEC,
-MSG_CMSG_CLOEXEC, sys/signalfd.h, clock_nanosleep). These patches were not committed and
-need to be recreated if rebuilding. The working binary exists at `build/server/virgl_render_server`.
+3. `b98dce01` - feature(minor): Add macOS compatibility for render server
+   - Files: render_socket.c, render_worker.c, proxy_socket.c, vkr_ring.c
+   - SOCK_STREAM instead of SOCK_SEQPACKET, pipe-based signalfd, nanosleep
+
+**Build Notes**:
+- Configure with: `meson configure builddir -Drender-server-worker=process`
+- macOS lacks C11 threads.h, so thread workers aren't supported
 
 ---
 
