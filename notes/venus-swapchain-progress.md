@@ -251,8 +251,83 @@ scp -P 2222 builddir-arm64/src/virtio/vulkan/libvulkan_virtio.so root@localhost:
 
 Guest needs: `apk add xcb-util-keysyms`
 
+## HVF 16KB Alignment Fix - SOLVED (2026-01-21)
+
+### Solution: 16KB Page Guest Kernel
+
+**Problem**: Guest Linux kernel uses 4KB pages, but HVF requires 16KB-aligned memory regions for GPU blob mappings.
+
+**Solution**: Build custom Linux kernel 6.12.1 with CONFIG_ARM64_16K_PAGES=y
+
+### Build Commands
+```bash
+# Extract kernel
+cd /opt/other/kernel-build
+tar xf linux-6.12.1.tar.xz
+
+# Docker cross-compile for aarch64
+docker run --rm \
+  -v /opt/other/kernel-build/linux-6.12.1:/kernel \
+  --platform linux/arm64 \
+  alpine:edge sh -c '
+    apk add --no-cache build-base bc bison flex perl openssl-dev elfutils-dev linux-headers ncurses-dev xz findutils diffutils gmp-dev mpc1-dev mpfr-dev bash
+    cd /kernel
+    make ARCH=arm64 defconfig
+    scripts/config --disable CONFIG_ARM64_4K_PAGES
+    scripts/config --enable CONFIG_ARM64_16K_PAGES
+    scripts/config --enable CONFIG_DRM_VIRTIO_GPU  # Build virtio-gpu as built-in!
+    scripts/config --set-val CONFIG_DRM_VIRTIO_GPU y
+    scripts/config --set-val CONFIG_DRM y
+    scripts/config --set-val CONFIG_DRM_GEM_SHMEM_HELPER y
+    scripts/config --disable CONFIG_GCC_PLUGINS
+    scripts/config --disable CONFIG_MODULE_SIG
+    scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+    make ARCH=arm64 olddefconfig
+    make ARCH=arm64 -j$(nproc) Image
+  '
+
+# Copy kernel
+cp /opt/other/kernel-build/linux-6.12.1/arch/arm64/boot/Image scripts/alpine-virt-16k.img
+```
+
+### Running with HVF
+```bash
+export QEMU_ACCEL=hvf
+export QEMU_KERNEL=/opt/other/qemu/scripts/alpine-virt-16k.img
+./scripts/run-alpine.sh run
+# Or manually:
+./build/qemu-system-aarch64 \
+  -M virt -accel hvf -cpu host -m 2G -smp 4 \
+  -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M \
+  -kernel scripts/alpine-virt-16k.img \
+  -initrd /tmp/alpine-boot/boot/initramfs-virt \
+  -append "console=ttyAMA0 root=/dev/vda3 modules=ext4 rootfstype=ext4" \
+  -drive if=virtio,file=/tmp/alpine-16k-overlay.qcow2,format=qcow2 ...
+```
+
+### Test Results
+```
+# Verify 16KB pages
+$ getconf PAGE_SIZE
+16384
+
+# Venus works!
+$ vulkaninfo --summary
+GPU0:
+    deviceName = Virtio-GPU Venus (Apple M2 Pro)
+    driverID   = DRIVER_ID_MESA_VENUS
+    driverName = venus
+    driverInfo = Mesa 25.2.7
+```
+
+### Important Notes
+- **Build virtio-gpu as built-in** (y, not m) - the 16KB kernel won't have modules from existing initrd
+- Existing initramfs works fine - it just loads ext4 and mounts root
+- Display/scanout path still needs work (VK_KHR_display not detecting displays)
+- But Venus protocol communication and blob mapping now work correctly with HVF!
+
 ### Next Steps
 
-1. **Debug blob creation failure** - Check QEMU/virglrenderer logs
-2. **Investigate hostmem allocation** - May need more hostmem or different config
-3. **Fix HVF 16KB alignment** - Required for acceptable performance
+1. **Fix VK_KHR_display** - Display enumeration needs work for vkcube --wsi display
+2. **Investigate headless rendering** - Test compute/offscreen rendering
+3. **Debug blob scanout** - May need more work for actual display output

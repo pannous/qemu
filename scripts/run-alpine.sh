@@ -60,14 +60,24 @@ MODE="${1:-run}"
 
 # Common options for Venus dual-GPU
 # IMPORTANT: Venus device FIRST so it becomes renderD128 (Mesa opens renderD128 first)
-# Use TCG for now - HVF has 16KB page alignment issues with 4KB blob allocations
-# HVF silently fails to map non-16KB-aligned memory regions
+#
+# HVF acceleration: requires 16KB page kernel!
+# Default 4KB kernel causes HVF to fail (16KB alignment requirement for memory regions)
+# Use QEMU_ACCEL=hvf with QEMU_KERNEL=/path/to/16k-kernel for HVF
 ACCEL="${QEMU_ACCEL:-tcg}"
 if [[ "$ACCEL" == "hvf" ]]; then
     ACCEL_OPTS="-accel hvf -cpu host"
+    # Warn if not using 16KB kernel
+    if [[ -z "${QEMU_KERNEL:-}" ]]; then
+        echo "WARNING: HVF requires 16KB page kernel. Set QEMU_KERNEL to use custom kernel."
+        echo "         e.g. QEMU_KERNEL=$SCRIPT_DIR/alpine-virt-16k.img"
+    fi
 else
     ACCEL_OPTS="-accel tcg -cpu max"
 fi
+
+# Custom kernel override (for 16KB page kernel)
+CUSTOM_KERNEL="${QEMU_KERNEL:-}"
 
 COMMON_OPTS=(
     -M virt $ACCEL_OPTS -m 2G -smp 4
@@ -148,6 +158,13 @@ case "$MODE" in
             echo "Note: Using ISO kernel (guestfish not available for extraction)"
             INSTALLED_KERNEL="/tmp/alpine-boot/boot/vmlinuz-virt"
             INSTALLED_INITRD="/tmp/alpine-boot/boot/initramfs-virt"
+        fi
+
+        # Use custom kernel if specified (for 16KB page kernel with HVF)
+        if [[ -n "$CUSTOM_KERNEL" ]]; then
+            echo "Using custom kernel: $CUSTOM_KERNEL"
+            INSTALLED_KERNEL="$CUSTOM_KERNEL"
+            # Note: 16KB kernel may need compatible initrd or modules
         fi
 
         # Boot with root on vda3 (standard Alpine sys install layout: vda1=boot, vda2=swap, vda3=root)
