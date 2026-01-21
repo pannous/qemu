@@ -1,102 +1,157 @@
-# Venus Swapchain Status - 2026-01-20
+# Venus Swapchain Status - 2026-01-21
 
 ## Summary
 
-Venus blob scanout works, but vkcube fails because Mesa doesn't expose VK_KHR_swapchain.
+VK_KHR_swapchain works with patched Mesa. WSI operations (acquire, present) work, but
+**any command buffer containing vkCmdBindPipeline causes the host to hang** in MoltenVK's
+vkQueueSubmit. This affects both graphics and compute pipelines.
 
-## Working Components
+## Root Cause Analysis
 
-1. **DRM/KMS Scanout**: Direct framebuffer works via dumb buffers
-2. **Venus Protocol**: Commands forwarded to MoltenVK correctly
-3. **Fence Workaround**: `VN_PERF=no_fence_feedback` fixes fence signaling
-4. **Host Vulkan Swapchain**: QEMU's `virtio-gpu-vk-swapchain.m` implementation exists
+### The Problem
+When a Vulkan command buffer containing `vkCmdBindPipeline` is submitted:
+1. Guest records command buffer (works fine - commands are encoded locally)
+2. Guest calls vkQueueSubmit (sends Venus protocol to host)
+3. virglrenderer decodes protocol and calls host vkQueueSubmit
+4. **MoltenVK hangs** in vkQueueSubmit - never returns
 
-## Blocked
+### What Works
+- Pipeline creation (vkCreateGraphicsPipelines, vkCreateComputePipelines) ✅
+- Command buffer recording with pipeline bind (local operation) ✅
+- Clear-only render passes (no pipeline bind) ✅
+- Image barriers and layout transitions ✅
+- Semaphore signaling/waiting ✅
+- All WSI operations (surface, swapchain, acquire, present) ✅
 
-### vkcube Error
+### What Fails
+- Submitting command buffer with vkCmdBindPipeline (graphics) ❌
+- Submitting command buffer with vkCmdBindPipeline (compute) ❌
+- Any draw calls (which require pipeline bind) ❌
+- vkcube render frame ❌
+
+### Debug Output
 ```
-vkEnumerateDeviceExtensionProperties failed to find the VK_KHR_swapchain extension.
+Device OK
+Image OK
+Framebuffer OK
+Shaders OK
+Pipeline OK
+Recording...
+Submitting...
+DBG: vn_queue_submit enter, batch_type=0 batch_count=1
+  batch[0]: wait=0 cmd=1 signal=0
+DBG: sync vn_call_vkQueueSubmit        <- Enters virglrenderer QueueSubmit
+MESA-VIRTIO: debug: vn_ring_submit abort on fatal  <- Host never responds
 ```
-
-### Root Cause Analysis
-
-Mesa Venus driver (vn_physical_device.c) has:
-```c
-#ifdef VN_USE_WSI_PLATFORM
-   exts->KHR_swapchain = true;
-#endif
-```
-
-The Alpine `mesa-vulkan-virtio` package:
-- Links against WSI libraries (libxcb, libxcb-dri3, etc.)
-- Contains "VK_KHR_swapchain" string in binary
-- Does NOT advertise VK_KHR_swapchain at runtime
-
-This suggests either:
-1. `VN_USE_WSI_PLATFORM` not defined at compile time
-2. Runtime bug in extension enumeration
-3. Mesa build configuration issue
 
 ### Evidence
-- `vulkaninfo` shows 104 device extensions, NO swapchain
-- Instance has surface extensions (VK_KHR_surface, xcb_surface, xlib_surface)
-- `strings libvulkan_virtio.so | grep KHR_swapchain` finds the string
-- Mesa version: 26.0.0-devel (git-c3f7d9bd1e)
+1. Command recording completes (test_record_only test passes)
+2. Pipeline creation completes (test_pipeline test passes)
+3. Clear-only submission completes (test_clear test passes)
+4. Pipeline bind submission hangs (test_bind test fails)
+5. Same behavior with compute pipelines
 
-## Tested
+## Technical Details
 
-| Test | Result |
-|------|--------|
-| DRM dumb buffer → CRTC | ✅ Works (red screen) |
-| GBM buffer → CRTC | ✅ Works (gradient) |
-| X11 + vkcube | ❌ Missing VK_KHR_swapchain |
-| Vulkan device enumeration | ✅ "Virtio-GPU Venus (Apple M2 Pro)" |
-| Vulkan fence + VN_PERF | ✅ Works with workaround |
-
-## Test Commands
-
-```bash
-# In Alpine guest:
-# Kill X first to get DRM master
-kill -9 $(pgrep Xorg) 2>/dev/null
-
-# DRM dumb buffer test (shows red)
-/tmp/test_drm
-
-# GBM buffer test (shows green-blue gradient)
-/tmp/test_gbm
+### Venus Command Flow for Pipeline Bind
 ```
+Guest: vkCmdBindPipeline(cmdBuf, bindPoint, pipeline)
+  → Venus encodes: VN_CMD_ENQUEUE(vkCmdBindPipeline, ...)
+  → Stored in guest command buffer stream
+
+Guest: vkQueueSubmit(queue, 1, &submit, fence)
+  → Venus sends submit to host via virtio-gpu ring
+  → virglrenderer receives, calls vkr_dispatch_vkQueueSubmit()
+  → virglrenderer calls host vk->QueueSubmit()
+  → MoltenVK should execute command buffer
+  → **HANG: MoltenVK never returns**
+```
+
+### virglrenderer Code Path
+In `vkr_queue.c:406`:
+```c
+mtx_lock(&queue->vk_mutex);
+args->ret =
+   vk->QueueSubmit(args->queue, args->submitCount, args->pSubmits, args->fence);  // HANGS HERE
+mtx_unlock(&queue->vk_mutex);
+```
+
+## Attempted Mitigations
+
+| Attempt | Result |
+|---------|--------|
+| VKR_DEBUG=validate | No validation errors before hang |
+| MVK_CONFIG_DEBUG_MODE=1 | No debug output |
+| MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 | Still hangs |
+| VN_PERF=no_async_queue_submit | Hang is more visible |
+| Force QueueSubmit2→QueueSubmit1 | No effect |
+
+## Hypothesis
+
+The hang is in MoltenVK's command buffer execution, specifically when processing
+the pipeline bind. Possible causes:
+
+1. **Metal shader compilation** happening lazily during execution
+   - Pipeline was created, but Metal PSO might compile on first use
+   - Could be stuck in shader compiler
+
+2. **MoltenVK bug** with certain render pass / pipeline combinations
+   - The command buffer has: BeginRenderPass → BindPipeline → EndRenderPass
+   - Something about this sequence might trigger a bug
+
+3. **Thread deadlock** in MoltenVK
+   - The host uses mutexes around QueueSubmit
+   - MoltenVK might have internal locking that conflicts
+
+4. **Metal command buffer state issue**
+   - The recorded Metal commands might be in an invalid state
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `vn_physical_device.c:1097-1157` | Gate fence/semaphore handles on sync_fd support |
+| `vn_physical_device.c:1226` | Unconditionally enable KHR_swapchain |
+| `vn_device.c:334` | Gate external_semaphore_fd on semaphore_importable |
+| `vn_wsi.c:827-882` | Add fallback queue submit for acquire semaphore |
+| `vn_queue.c` | Debug output for submit tracing |
 
 ## Next Steps
 
-### Option A: Build Custom Mesa (Recommended)
-1. Clone mesa from /opt/other/mesa
-2. Configure with `-Dvulkan-drivers=virtio -Dplatforms=x11`
-3. Verify `VN_USE_WSI_PLATFORM` is defined
-4. Install in Alpine guest
+1. **Debug MoltenVK directly**
+   - Build debug MoltenVK from source
+   - Add tracing to MVKCommandBuffer::submit()
+   - Check Metal command encoder state
 
-### Option B: Test Blob Scanout Without Swapchain
-1. Create Venus blob resource
-2. Render to blob with Vulkan
-3. Use SET_SCANOUT_BLOB to display
-4. Bypasses need for guest swapchain
+2. **Try different shader/pipeline**
+   - Use simplest possible vertex/fragment shaders
+   - Remove vertex input (use gl_VertexIndex)
+   - Try different render pass configurations
 
-### Option C: Investigate Alpine Build
-1. Check Alpine's mesa APKBUILD
-2. Verify meson configuration options
-3. Report bug if VN_USE_WSI_PLATFORM should be set
+3. **Test with different Vulkan implementation**
+   - Try running the same test natively on macOS
+   - If native works but Venus doesn't, issue is in protocol translation
+   - If native also hangs, issue is in MoltenVK
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `/opt/other/mesa/src/virtio/vulkan/vn_physical_device.c:1211-1217` | Swapchain extension enable |
-| `/opt/other/mesa/src/virtio/vulkan/meson.build:118-123` | VN_USE_WSI_PLATFORM condition |
-| `/opt/other/qemu/hw/display/virtio-gpu-vk-swapchain.m` | Host-side swapchain |
+4. **Check MoltenVK issues**
+   - Search MoltenVK GitHub for similar hangs
+   - Check if there are known issues with Apple Silicon
 
 ## Environment
 
 - Guest: Alpine Linux edge (aarch64)
-- Mesa: 26.0.0-devel
+- Custom Mesa: Built in Docker (alpine:edge aarch64)
 - Host: macOS with MoltenVK 1.4.0
-- QEMU: virtio-gpu with venus=on, blob=on
+- QEMU: virtio-gpu-gl with venus=on, blob=on
+
+## Test Commands
+
+```bash
+# Copy patched library to guest
+scp -P 2222 /tmp/libvulkan_virtio.so root@localhost:/usr/lib/
+
+# Run tests
+ssh -p 2222 root@localhost 'VN_PERF=no_fence_feedback /tmp/test_clear'    # Works
+ssh -p 2222 root@localhost 'VN_PERF=no_fence_feedback /tmp/test_pipeline' # Works
+ssh -p 2222 root@localhost 'VN_PERF=no_fence_feedback /tmp/test_bind'     # Hangs
+```
