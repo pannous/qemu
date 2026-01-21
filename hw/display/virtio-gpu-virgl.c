@@ -19,6 +19,7 @@
 #include "hw/virtio/virtio-gpu.h"
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
+#include "system/hvf.h"
 
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
@@ -120,8 +121,10 @@ virtio_gpu_virgl_map_resource_blob(VirtIOGPU *g,
     VirtIOGPUBase *b = VIRTIO_GPU_BASE(g);
     MemoryRegion *mr;
     uint64_t size;
+    uint64_t aligned_size;
     void *data;
     int ret;
+    uint64_t page_size = qemu_real_host_page_size();
 
     if (!virtio_gpu_hostmem_enabled(b->conf)) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: hostmem disabled\n", __func__);
@@ -135,11 +138,36 @@ virtio_gpu_virgl_map_resource_blob(VirtIOGPU *g,
         return ret;
     }
 
+    /*
+     * HVF on Apple Silicon requires 16KB page alignment for memory regions.
+     * Check both the offset (guest-provided) and data pointer (from virglrenderer)
+     * are aligned to the host page size. Also round up size to page alignment.
+     */
+    if (hvf_enabled()) {
+        if (!QEMU_IS_ALIGNED(offset, page_size)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: HVF requires %"PRIu64"KB-aligned offset, got 0x%"PRIx64"\n",
+                          __func__, page_size / 1024, offset);
+            virgl_renderer_resource_unmap(res->base.resource_id);
+            return -EINVAL;
+        }
+        if (!QEMU_IS_ALIGNED((uintptr_t)data, page_size)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: HVF requires %"PRIu64"KB-aligned data pointer, got %p\n",
+                          __func__, page_size / 1024, data);
+            virgl_renderer_resource_unmap(res->base.resource_id);
+            return -EINVAL;
+        }
+    }
+
+    /* Round up size to page alignment for HVF compatibility */
+    aligned_size = ROUND_UP(size, page_size);
+
     vmr = g_new0(struct virtio_gpu_virgl_hostmem_region, 1);
     vmr->g = g;
 
     mr = &vmr->mr;
-    memory_region_init_ram_ptr(mr, OBJECT(mr), "blob", size, data);
+    memory_region_init_ram_ptr(mr, OBJECT(mr), "blob", aligned_size, data);
     memory_region_add_subregion(&b->hostmem, offset, mr);
     memory_region_set_enabled(mr, true);
 
