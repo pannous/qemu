@@ -2,7 +2,13 @@
 
 ## Summary
 
-✅ **MILESTONE**: Venus rendering with visible display output on macOS! RGB triangle successfully renders via Vulkan and displays in QEMU window using HOST_VISIBLE memory + CPU copy path.
+✅ **MAJOR MILESTONE ACHIEVED**: Venus rendering fully working on macOS with animated 3D graphics!
+
+- ✅ RGB triangle demo working (single frame)
+- ✅ **Animated spinning cube working at 273 FPS!**
+- ✅ Depth buffering working
+- ✅ All vertex transforms + rasterization + fragment shading on host GPU
+- ✅ Vulkan → MoltenVK → Metal pipeline fully functional
 
 ## What Works
 
@@ -107,21 +113,27 @@ Done!
 
 ## Next Steps
 
-### 1. Zero-Copy Rendering (Blocked)
+### 1. ✅ DONE: Working Demos
+Both triangle and vkcube demos now work via HOST_VISIBLE + copy path!
+
+### 2. Performance Analysis
+Current performance is already excellent (273 FPS), but potential improvements:
+- **Bottleneck**: CPU copy from VkImage to GBM (~1.3GB/s at 1280x800x4x273fps)
+- **Profile**: Measure if copy dominates frame time vs rendering
+- **Current approach is sufficient** for most use cases
+
+### 3. Zero-Copy Rendering (Future Optimization)
 **Goal**: Import GBM prime FD directly as VkImage, eliminate CPU copy
 **Blocker**: Resource ID mismatch - Venus blob resource IDs don't match GBM prime FDs
 **Status**: See `notes/zero-copy-todo.md` for investigation details
+**Priority**: Low - current performance is good enough for now
 
-### 2. vkcube Demo
-**Status**: Format fixed to XRGB8888, but still fails with VK_ERROR_DEVICE_LOST
-**Issue**: Uses external memory import (zero-copy path) which doesn't work yet
-**Solution**: Refactor vkcube to use HOST_VISIBLE + copy path like triangle demo
-
-### 3. Performance Optimization
-Once zero-copy works:
-- IOSurface-Vulkan interop for Metal backend
-- Direct scanout without staging buffer
-- Reduce memory bandwidth usage
+### 4. Real-World Applications
+With working Venus + display, next targets:
+- Test Mesa demos (glxgears equivalent for Vulkan)
+- Test vkcube-wayland with wlroots
+- Integration with Redox OS
+- IOSurface optimization for macOS (if needed)
 
 ## Files Modified
 
@@ -160,10 +172,20 @@ cd /root
 - **Method**: HOST_VISIBLE memory + CPU copy to GBM
 - **Format**: GBM_FORMAT_XRGB8888 (no alpha)
 - **Result**: RGB triangle on blue background
-- **Display**: 5 seconds
+- **Display**: 5 seconds (single frame)
 
-### vkcube (❌ Not Working Yet)
+### vkcube (✅ Working!)
 - **Path**: `guest-demos/vkcube/vkcube_anim.c`
+- **Method**: HOST_VISIBLE memory + CPU copy to GBM
+- **Format**: GBM_FORMAT_XRGB8888 (no alpha)
+- **Result**: Spinning rainbow cube with depth buffer
+- **Display**: 10 seconds animation
+- **Performance**: **273.4 FPS** (2734 frames in 10s)
+- **Rendering**: All vertex transforms + rasterization + fragment shading on host GPU
+- **Details**: MVP matrix computed on guest CPU, uploaded to uniform buffer, vertex shader does transforms on host
+
+### vkcube_zerocopy (❌ Not Working)
+- **Path**: `guest-demos/vkcube/vkcube_anim_zerocopy_attempt.c`
 - **Method**: External memory import (zero-copy attempt)
 - **Issue**: VK_ERROR_DEVICE_LOST due to resource ID mismatch
-- **TODO**: Refactor to HOST_VISIBLE + copy path
+- **Status**: Preserved for future reference when zero-copy is fixed
