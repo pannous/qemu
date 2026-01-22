@@ -30,6 +30,8 @@ void virtio_gpu_release_iosurface(IOSurfaceRef surface);
 void virtio_gpu_get_iosurface_size(IOSurfaceRef surface,
                                     uint32_t *width, uint32_t *height);
 
+bool virtio_gpu_present_iosurface(IOSurfaceRef surface, void *metal_layer);
+
 #endif /* __APPLE__ */
 
 #endif /* VIRTIO_GPU_IOSURFACE_H */

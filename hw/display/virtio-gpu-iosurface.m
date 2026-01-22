@@ -16,6 +16,8 @@
 
 #include <IOSurface/IOSurface.h>
 #include <CoreFoundation/CoreFoundation.h>
+#import <QuartzCore/QuartzCore.h>
+#import <Metal/Metal.h>
 
 /*
  * Map pixman format to IOSurface pixel format (CoreVideo/CoreGraphics format)
@@ -164,4 +166,86 @@ void virtio_gpu_get_iosurface_size(IOSurfaceRef surface,
         *width = 0;
         *height = 0;
     }
+}
+
+static MTLPixelFormat iosurface_to_metal_format(OSType fmt)
+{
+    switch (fmt) {
+    case 'BGRA':
+        return MTLPixelFormatBGRA8Unorm;
+    case 'RGBA':
+        return MTLPixelFormatRGBA8Unorm;
+    default:
+        return MTLPixelFormatInvalid;
+    }
+}
+
+bool virtio_gpu_present_iosurface(IOSurfaceRef surface, void *metal_layer)
+{
+    if (!surface || !metal_layer) {
+        return false;
+    }
+
+    CAMetalLayer *layer = (CAMetalLayer *)metal_layer;
+    id<MTLDevice> device = layer.device;
+    if (!device) {
+        device = MTLCreateSystemDefaultDevice();
+        if (!device) {
+            return false;
+        }
+        layer.device = device;
+    }
+
+    static id<MTLCommandQueue> queue;
+    if (!queue) {
+        queue = [device newCommandQueue];
+        if (!queue) {
+            return false;
+        }
+    }
+
+    id<CAMetalDrawable> drawable = [layer nextDrawable];
+    if (!drawable) {
+        return false;
+    }
+
+    OSType fmt = IOSurfaceGetPixelFormat(surface);
+    MTLPixelFormat metal_fmt = iosurface_to_metal_format(fmt);
+    if (metal_fmt == MTLPixelFormatInvalid) {
+        return false;
+    }
+
+    size_t width = IOSurfaceGetWidth(surface);
+    size_t height = IOSurfaceGetHeight(surface);
+
+    MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:metal_fmt
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+
+    id<MTLTexture> src =
+        [device newTextureWithDescriptor:desc iosurface:surface plane:0];
+    if (!src) {
+        return false;
+    }
+
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    MTLSize size = MTLSizeMake(width, height, 1);
+    [blit copyFromTexture:src
+               sourceSlice:0
+               sourceLevel:0
+              sourceOrigin:MTLOriginMake(0, 0, 0)
+                sourceSize:size
+                 toTexture:drawable.texture
+          destinationSlice:0
+          destinationLevel:0
+         destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    [cb presentDrawable:drawable];
+    [cb commit];
+
+    return true;
 }

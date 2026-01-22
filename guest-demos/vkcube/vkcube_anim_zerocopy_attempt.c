@@ -16,6 +16,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <gbm.h>
+#include <libdrm/drm_fourcc.h>
 #include <vulkan/vulkan.h>
 
 // Rainbow cube vertices: position (x,y,z) + color (r,g,b)
@@ -74,6 +75,57 @@ static uint32_t find_mem(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, VkM
 }
 #define VK_CHECK(x) do{VkResult r=(x);if(r){printf("VK err %d @ %d\n",r,__LINE__);exit(1);}}while(0)
 
+static void dump_device_extensions(VkPhysicalDevice gpu)
+{
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties(gpu, NULL, &count, NULL);
+    VkExtensionProperties *props = calloc(count, sizeof(*props));
+    if (!props) return;
+    if (vkEnumerateDeviceExtensionProperties(gpu, NULL, &count, props) != VK_SUCCESS) {
+        free(props);
+        return;
+    }
+    printf("Device extensions (%u):\n", count);
+    for (uint32_t i = 0; i < count; i++) {
+        printf("  %s\n", props[i].extensionName);
+    }
+    free(props);
+}
+
+static void dump_format_modifiers(VkPhysicalDevice gpu, VkFormat fmt)
+{
+    VkDrmFormatModifierPropertiesListEXT mod_list = {
+        .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+    };
+    VkFormatProperties2 props2 = {
+        .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+        .pNext = &mod_list,
+    };
+
+    vkGetPhysicalDeviceFormatProperties2(gpu, fmt, &props2);
+    if (!mod_list.drmFormatModifierCount) {
+        printf("No DRM format modifiers reported for format %d\n", fmt);
+        return;
+    }
+
+    VkDrmFormatModifierPropertiesEXT *mods =
+        calloc(mod_list.drmFormatModifierCount, sizeof(*mods));
+    if (!mods)
+        return;
+
+    mod_list.pDrmFormatModifierProperties = mods;
+    vkGetPhysicalDeviceFormatProperties2(gpu, fmt, &props2);
+
+    printf("DRM modifiers for format %d (count=%u):\n", fmt, mod_list.drmFormatModifierCount);
+    for (uint32_t i = 0; i < mod_list.drmFormatModifierCount; i++) {
+        printf("  mod=0x%llx planes=%u tiling=0x%x\n",
+               (unsigned long long)mods[i].drmFormatModifier,
+               mods[i].drmFormatModifierPlaneCount,
+               mods[i].drmFormatModifierTilingFeatures);
+    }
+    free(mods);
+}
+
 int main(void) {
     // === DRM/GBM Setup ===
     int drm_fd = open("/dev/dri/card0", O_RDWR);
@@ -117,6 +169,8 @@ int main(void) {
     vkEnumeratePhysicalDevices(instance, &gpuCount, &gpu);
     VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(gpu, &props);
     printf("Rainbow Cube on %s (%ux%u)\n", props.deviceName, W, H);
+    dump_device_extensions(gpu);
+    dump_format_modifiers(gpu, VK_FORMAT_B8G8R8A8_UNORM);
     VkPhysicalDeviceMemoryProperties memProps; vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
     const char *dev_exts[] = {
@@ -152,17 +206,36 @@ int main(void) {
     };
 
     VkImage rtImg;
-    VK_CHECK(vkCreateImage(device, &(VkImageCreateInfo){
-        .sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext=&ext_info,
-        .imageType=VK_IMAGE_TYPE_2D,
-        .format=VK_FORMAT_B8G8R8A8_UNORM,
-        .extent={W,H,1},
-        .mipLevels=1,.arrayLayers=1,
-        .samples=VK_SAMPLE_COUNT_1_BIT,
-        .tiling=VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-        .usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-    }, NULL, &rtImg));
+    VkImageCreateInfo rt_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &ext_info,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_B8G8R8A8_UNORM,
+        .extent = { W, H, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+    };
+
+    VkResult create_res = vkCreateImage(device, &rt_info, NULL, &rtImg);
+    if (create_res != VK_SUCCESS) {
+        printf("vkCreateImage (DRM modifier) failed: %d\n", create_res);
+        if (getenv("VKR_TRY_LINEAR")) {
+            VkExternalMemoryImageCreateInfo linear_ext = {
+                .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+                .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+            };
+            VkImageCreateInfo linear_info = rt_info;
+            linear_info.pNext = &linear_ext;
+            linear_info.tiling = VK_IMAGE_TILING_LINEAR;
+            printf("Retrying vkCreateImage with VK_IMAGE_TILING_LINEAR...\n");
+            VK_CHECK(vkCreateImage(device, &linear_info, NULL, &rtImg));
+        } else {
+            VK_CHECK(create_res);
+        }
+    }
 
     VkMemoryRequirements rtReq; vkGetImageMemoryRequirements(device, rtImg, &rtReq);
     VkDeviceMemory rtMem;

@@ -20,6 +20,7 @@
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
 #include "system/hvf.h"
+#include <dlfcn.h>
 
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
@@ -28,6 +29,7 @@
 #ifdef __APPLE__
 #include "virtio-gpu-iosurface.h"
 #include "virtio-gpu-vk-swapchain.h"
+#include <IOSurface/IOSurface.h>
 
 /* Cocoa display exports for Metal layer access */
 extern void *cocoa_get_metal_layer(void);
@@ -41,6 +43,8 @@ struct virtio_gpu_virgl_resource {
     MemoryRegion *mr;
 #ifdef __APPLE__
     IOSurfaceRef iosurface;
+    uint32_t iosurface_id;
+    uint32_t ctx_id;
     void *mapped_blob;      /* Blob pointer from virgl_renderer_resource_map */
     uint64_t mapped_size;   /* Size of mapped blob */
     /* Software scanout support for 2D resources without OpenGL */
@@ -48,6 +52,58 @@ struct virtio_gpu_virgl_resource {
     uint32_t scanout_stride;        /* Stride of scanout buffer */
 #endif
 };
+
+typedef int (*virgl_renderer_resource_register_venus_fn)(uint32_t ctx_id,
+                                                         uint32_t res_id);
+typedef int (*virgl_renderer_resource_get_iosurface_id_fn)(uint32_t ctx_id,
+                                                           uint32_t res_id,
+                                                           uint32_t *out_id);
+
+static bool
+virgl_try_register_venus_resource(uint32_t ctx_id, uint32_t res_id)
+{
+    static virgl_renderer_resource_register_venus_fn register_fn;
+    static bool looked_up;
+
+    if (!looked_up) {
+        register_fn = (virgl_renderer_resource_register_venus_fn)dlsym(
+            RTLD_DEFAULT, "virgl_renderer_resource_register_venus");
+        looked_up = true;
+    }
+
+    if (!register_fn) {
+        warn_report_once("virgl_renderer_resource_register_venus not available; "
+                         "zero-copy Venus import will stay disabled");
+        return false;
+    }
+
+    return register_fn(ctx_id, res_id) == 0;
+}
+
+static bool
+virgl_try_get_resource_iosurface_id(uint32_t ctx_id, uint32_t res_id, uint32_t *out_id)
+{
+    static virgl_renderer_resource_get_iosurface_id_fn get_fn;
+    static bool looked_up;
+
+    if (!out_id) {
+        return false;
+    }
+
+    if (!looked_up) {
+        get_fn = (virgl_renderer_resource_get_iosurface_id_fn)dlsym(
+            RTLD_DEFAULT, "virgl_renderer_resource_get_iosurface_id");
+        looked_up = true;
+    }
+
+    if (!get_fn) {
+        warn_report_once("virgl_renderer_resource_get_iosurface_id not available; "
+                         "IOSurface zero-copy path will stay disabled");
+        return false;
+    }
+
+    return get_fn(ctx_id, res_id, out_id) == 0;
+}
 
 static struct virtio_gpu_virgl_resource *
 virtio_gpu_virgl_find_resource(VirtIOGPU *g, uint32_t resource_id)
@@ -393,6 +449,12 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
         res->mapped_blob = NULL;
         res->mapped_size = 0;
     }
+    if (res->iosurface) {
+        virtio_gpu_release_iosurface(res->iosurface);
+        res->iosurface = NULL;
+    }
+    res->iosurface_id = 0;
+    res->ctx_id = 0;
     /* Clean up software scanout pixman image */
     if (res->scanout_image) {
         pixman_image_unref(res->scanout_image);
@@ -989,12 +1051,20 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
     res->base.dmabuf_fd = info.fd;
 
 #ifdef __APPLE__
+    res->ctx_id = cblob.hdr.ctx_id;
+    res->iosurface_id = 0;
     if (res->base.dmabuf_fd < 0) {
         warn_report_once("Blob resource %d created without dmabuf backing. "
                          "Blob scanout will not work on macOS without dmabuf support.",
                          cblob.resource_id);
     }
 #endif
+
+    if (!virgl_try_register_venus_resource(cblob.hdr.ctx_id,
+                                           cblob.resource_id)) {
+        warn_report_once("Failed to register blob resource %d with Venus context %u",
+                         cblob.resource_id, cblob.hdr.ctx_id);
+    }
 
     QTAILQ_INSERT_HEAD(&g->reslist, &res->base, next);
     res = NULL;
@@ -1110,6 +1180,32 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     g->parent_obj.enable = 1;
 
 #ifdef __APPLE__
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    if (getenv("VKR_USE_IOSURFACE")) {
+        uint32_t ios_id = 0;
+        if (res->ctx_id &&
+            virgl_try_get_resource_iosurface_id(res->ctx_id, ss.resource_id, &ios_id) &&
+            ios_id) {
+            if (!res->iosurface || res->iosurface_id != ios_id) {
+                if (res->iosurface) {
+                    virtio_gpu_release_iosurface(res->iosurface);
+                }
+                res->iosurface = IOSurfaceLookup(ios_id);
+                res->iosurface_id = ios_id;
+            }
+            if (res->iosurface) {
+                fprintf(stderr, "QEMU IOSurface zero-copy: res_id=%u iosurface_id=%u\n",
+                        ss.resource_id, ios_id);
+                cocoa_set_metal_layer_enabled(true);
+                if (virtio_gpu_present_iosurface(res->iosurface,
+                                                 cocoa_get_metal_layer())) {
+                    g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                    return;
+                }
+            }
+        }
+    }
+
     /*
      * On macOS, dmabuf is not available. We use a host-side Vulkan swapchain
      * for presentation when Venus is enabled, with fallback to software scanout.
@@ -1132,11 +1228,31 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         res->mapped_size = size;
     }
 
-    /*
-     * Try to present via host Vulkan swapchain if available.
-     * This provides better performance for Venus rendering.
-     */
-    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    if (getenv("VKR_USE_IOSURFACE")) {
+        uint32_t ios_w = 0, ios_h = 0;
+        virtio_gpu_get_iosurface_size(res->iosurface, &ios_w, &ios_h);
+        if (!res->iosurface || ios_w != fb.width || ios_h != fb.height) {
+            if (res->iosurface) {
+                virtio_gpu_release_iosurface(res->iosurface);
+            }
+            res->iosurface = virtio_gpu_create_iosurface(fb.width, fb.height,
+                                                         fb.stride, fb.format);
+            res->iosurface_id = 0;
+        }
+
+        if (res->iosurface) {
+            virtio_gpu_update_iosurface(res->iosurface,
+                                        res->mapped_blob,
+                                        fb.width, fb.height,
+                                        fb.stride, fb.offset);
+            cocoa_set_metal_layer_enabled(true);
+            if (virtio_gpu_present_iosurface(res->iosurface,
+                                             cocoa_get_metal_layer())) {
+                g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                return;
+            }
+        }
+    }
     if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
         /* Resize swapchain if dimensions changed */
         uint32_t sw_width, sw_height;
