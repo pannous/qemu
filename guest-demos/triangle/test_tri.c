@@ -82,7 +82,7 @@ int main(void) {
     struct gbm_device *gbm = gbm_create_device(drm_fd);
     printf("GBM device=%p\n", (void*)gbm); fflush(stdout);
     printf("Creating GBM bo...\n"); fflush(stdout);
-    struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_ARGB8888,
+    struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
                                        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     printf("GBM bo=%p\n", (void*)bo); fflush(stdout);
     if (!bo) { printf("Failed to create GBM buffer\n"); return 1; }
@@ -101,7 +101,7 @@ int main(void) {
     uint32_t strides[4] = { stride, 0, 0, 0 };
     uint32_t offsets[4] = { 0, 0, 0, 0 };
     printf("handle=%u\n", handles[0]); fflush(stdout);
-    if (drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_ARGB8888, handles, strides, offsets, &fb_id, 0)) {
+    if (drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id, 0)) {
         printf("Failed to create framebuffer\n");
         return 1;
     }
