@@ -1,11 +1,9 @@
-/* Animated Vulkan cube demo - HOST_VISIBLE + copy path
+/* Zero-copy animated Vulkan cube demo
  *
  * Architecture:
- *   VkImage (LINEAR, HOST_VISIBLE) ← render on host
- *        ↓
- *   memcpy to GBM buffer (XRGB8888)
- *        ↓
- *   DRM scanout (drmModeDirtyFB + drmModeSetCrtc)
+ *   GBM blob (SCANOUT) ←─ import fd ─→ VkImage ←─ render
+ *        │
+ *        └─→ DRM scanout (same memory, no copy!)
  */
 #define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
@@ -79,7 +77,6 @@ static uint32_t find_mem(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, VkM
 int main(void) {
     // === DRM/GBM Setup ===
     int drm_fd = open("/dev/dri/card0", O_RDWR);
-    drmSetMaster(drm_fd);
     drmModeRes *res = drmModeGetResources(drm_fd);
     drmModeConnector *conn = NULL;
     for(int i=0; i<res->count_connectors; i++) {
@@ -93,11 +90,13 @@ int main(void) {
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
 
-    // Create GBM scanout buffer (XRGB8888 - no alpha!)
+    // Create GBM scanout buffer
     struct gbm_device *gbm = gbm_create_device(drm_fd);
     struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
                                        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     uint32_t stride = gbm_bo_get_stride(bo);
+    int prime_fd = gbm_bo_get_fd(bo);
+    uint64_t modifier = gbm_bo_get_modifier(bo);
 
     uint32_t fb_id;
     uint32_t handles[4] = { gbm_bo_get_handle(bo).u32 };
@@ -105,10 +104,13 @@ int main(void) {
     uint32_t offsets[4] = { 0 };
     drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id, 0);
 
-    // === Vulkan Setup (No External Memory!) ===
+    // === Vulkan with External Memory ===
+    const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
     VkInstance instance;
     VK_CHECK(vkCreateInstance(&(VkInstanceCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .enabledExtensionCount = 1,
+        .ppEnabledExtensionNames = inst_exts
     }, NULL, &instance));
 
     uint32_t gpuCount=1; VkPhysicalDevice gpu;
@@ -117,26 +119,48 @@ int main(void) {
     printf("Rainbow Cube on %s (%ux%u)\n", props.deviceName, W, H);
     VkPhysicalDeviceMemoryProperties memProps; vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
+    const char *dev_exts[] = {
+        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME
+    };
     float qp=1.0f; VkDevice device;
     VK_CHECK(vkCreateDevice(gpu, &(VkDeviceCreateInfo){
         .sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount=1,
         .pQueueCreateInfos=&(VkDeviceQueueCreateInfo){
             .sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueCount=1,.pQueuePriorities=&qp}
+            .queueCount=1,.pQueuePriorities=&qp},
+        .enabledExtensionCount=4,
+        .ppEnabledExtensionNames=dev_exts
     }, NULL, &device));
     VkQueue queue; vkGetDeviceQueue(device, 0, 0, &queue);
 
-    // === Render target: LINEAR + HOST_VISIBLE (like test_tri) ===
+    // === Import GBM as render target (ZERO-COPY) ===
+    VkSubresourceLayout plane_layout = { .offset=0, .rowPitch=stride };
+    VkImageDrmFormatModifierExplicitCreateInfoEXT drm_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+        .drmFormatModifier = modifier,
+        .drmFormatModifierPlaneCount = 1,
+        .pPlaneLayouts = &plane_layout
+    };
+    VkExternalMemoryImageCreateInfo ext_info = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .pNext = &drm_info,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+    };
+
     VkImage rtImg;
     VK_CHECK(vkCreateImage(device, &(VkImageCreateInfo){
         .sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext=&ext_info,
         .imageType=VK_IMAGE_TYPE_2D,
         .format=VK_FORMAT_B8G8R8A8_UNORM,
         .extent={W,H,1},
         .mipLevels=1,.arrayLayers=1,
         .samples=VK_SAMPLE_COUNT_1_BIT,
-        .tiling=VK_IMAGE_TILING_LINEAR,  // LINEAR for CPU access
+        .tiling=VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
         .usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
     }, NULL, &rtImg));
 
@@ -144,14 +168,15 @@ int main(void) {
     VkDeviceMemory rtMem;
     VK_CHECK(vkAllocateMemory(device, &(VkMemoryAllocateInfo){
         .sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext=&(VkImportMemoryFdInfoKHR){
+            .sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+            .handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            .fd=prime_fd
+        },
         .allocationSize=rtReq.size,
-        .memoryTypeIndex=find_mem(&memProps,rtReq.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        .memoryTypeIndex=find_mem(&memProps,rtReq.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     }, NULL, &rtMem));
     VK_CHECK(vkBindImageMemory(device, rtImg, rtMem, 0));
-
-    // Map render memory for copying later
-    void *rtPtr; VK_CHECK(vkMapMemory(device, rtMem, 0, VK_WHOLE_SIZE, 0, &rtPtr));
 
     VkImageView rtView;
     VK_CHECK(vkCreateImageView(device, &(VkImageViewCreateInfo){
@@ -160,7 +185,7 @@ int main(void) {
         .subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}
     }, NULL, &rtView));
 
-    // Depth buffer (OPTIMAL tiling is fine, we don't need to read it)
+    // Depth buffer (device local, no import needed)
     VkImage depthImg;
     VK_CHECK(vkCreateImage(device, &(VkImageCreateInfo){
         .sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -342,16 +367,12 @@ int main(void) {
     VkFence fence;
     VK_CHECK(vkCreateFence(device, &(VkFenceCreateInfo){.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL, &fence));
 
-    // Get VkImage layout for copying
-    VkSubresourceLayout layout;
-    vkGetImageSubresourceLayout(device, rtImg, &(VkImageSubresource){VK_IMAGE_ASPECT_COLOR_BIT,0,0}, &layout);
-
     // Matrices
     mat4 proj, view;
     mat4_perspective(proj, 3.14159f/4.0f, (float)W/(float)H, 0.1f, 100.0f);
     mat4_lookat(view, 0, 2, 5, 0, 0, 0, 0, 1, 0);
 
-    printf("Spinning for 10s (HOST_VISIBLE + copy)...\n");
+    printf("Spinning for 10s (zero-copy)...\n");
     struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
     int frames = 0;
 
@@ -386,7 +407,7 @@ int main(void) {
         vkCmdEndRenderPass(cmd);
         vkEndCommandBuffer(cmd);
 
-        // Submit and wait
+        // Submit
         VK_CHECK(vkQueueSubmit(queue, 1, &(VkSubmitInfo){
             .sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount=1,.pCommandBuffers=&cmd
@@ -394,28 +415,13 @@ int main(void) {
         VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
         vkResetFences(device, 1, &fence);
 
-        // Copy VkImage to GBM buffer (like test_tri)
-        void *gbmPtr = NULL; uint32_t gbmStride;
-        void *mapData = NULL;
-        gbmPtr = gbm_bo_map(bo, 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbmStride, &mapData);
-        if (gbmPtr) {
-            for (uint32_t y = 0; y < H; y++) {
-                memcpy((char*)gbmPtr + y * gbmStride,
-                       (char*)rtPtr + layout.offset + y * layout.rowPitch,
-                       W * 4);
-            }
-            gbm_bo_unmap(bo, mapData);
-        }
-
-        // Display via DRM
-        drmModeDirtyFB(drm_fd, fb_id, &(drmModeClip){0, 0, W, H}, 1);
+        // Scanout - NO COPY! GBM buffer IS the render target
         drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
         frames++;
     }
 
-    printf("Done! %d frames (%.1f fps) - HOST_VISIBLE + copy\n", frames, frames/10.0f);
+    printf("Done! %d frames (%.1f fps) - zero-copy!\n", frames, frames/10.0f);
 
-    vkUnmapMemory(device, rtMem);
     vkUnmapMemory(device, uboMem);
     vkDeviceWaitIdle(device);
 
