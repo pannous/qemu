@@ -2,11 +2,13 @@
 
 ## Summary
 
-**Current Working Path**: HOST_VISIBLE memory + CPU copy to GBM + drmModeDirtyFB
+✅ **MILESTONE ACHIEVED** (2026-01-22): Triangle rendering displays successfully!
+
+**Current Working Path**: HOST_VISIBLE memory + CPU copy to GBM + drmModeDirtyFB + **XRGB8888 format**
 
 **True Zero-Copy Blocked By**: virtio-gpu/Venus resource ID mismatch
 
-## Current State (2025-01-22)
+## Current State (2026-01-22)
 
 ### Completed ✅
 - **VK_KHR_external_memory_fd** - Exposed via SHM fallback
@@ -16,33 +18,97 @@
 - **VK_KHR_portability_subset** - Auto-added for MoltenVK
 - **GBM allocation path bypass** - Skipped when use_host_pointer_import=true
 - **Resource import translation** - VkImportMemoryResourceInfoMESA → VkImportMemoryHostPointerInfoEXT
+- **🎯 GBM format fix (2026-01-22)** - Changed ARGB8888 → XRGB8888 for scanout compatibility
+  - **Problem**: `drmModeSetCrtc` returned -22 (EINVAL)
+  - **Root Cause**: virtio-gpu doesn't support alpha channel formats for DRM scanout
+  - **Solution**: Use `GBM_FORMAT_XRGB8888` instead of `GBM_FORMAT_ARGB8888`
+  - **Result**: Triangle demo now displays successfully! ✅
 
 ### Test Results
-```
 test_minimal: SUCCESS (instance, device, fence creation)
-test_tri:     Renders triangle successfully
-              ERROR: Cannot copy - render memory not mapped (expected)
-```
 
-The "Cannot copy" error is **expected** - it's a CPU readback fallback that doesn't work for DEVICE_LOCAL memory. The actual GPU rendering completes successfully.
+/opt/other/qemu/ ssh -p 2222 root@localhost /root/test_tri
+Starting...
+Opened DRM fd=3
+Became DRM master
+Got resources res=0x7fff9306ba90
+Found connector
+Display: 1280x800
+Got encoder, crtc_id=36
+Creating GBM device...
+GBM device=0x7fff9309f0f0
+Creating GBM bo...
+GBM bo=0x7fff92627510
+Getting stride...
+stride=5120
+Getting fd...
+GBM blob: stride=5120, prime_fd=6
+Creating DRM framebuffer...
+handle=1
+Created framebuffer fb_id=42
+Creating Vulkan instance...
+vkCreateInstance returned 0
+Enumerating physical devices...
+vkEnumeratePhysicalDevices returned 0, count=1
+Getting device properties...
+GPU: Virtio-GPU Venus (Apple M2 Pro)
+Getting memory properties...
+Memory types: 3, heaps: 1
+Creating device...
+vkCreateDevice returned 0
+Getting device queue...
+Queue=0x7fff925f1570
+Creating VkImage...
+vkCreateImage returned 0
+Getting image memory requirements...
+Image memory: size=4096000, alignment=16, typeBits=0x3
+  MemType 0: flags=0x1 heap=0 (compatible)
+  MemType 1: flags=0xf heap=0 (compatible)
+  MemType 2: flags=0x11 heap=0 
+Finding HOST_VISIBLE memory type...
+Using memory type: 1 (HOST_VISIBLE)
+vkAllocateMemory returned 0
+Binding memory...
+vkBindImageMemory returned 0
+Mapping render memory...
+vkMapMemory returned 0
+Done with memory setup (HOST_VISIBLE + copy mode)
+Creating image view...
+vkCreateImageView returned 0
+Creating render pass...
+vkCreateRenderPass returned 0
+Creating framebuffer...
+vkCreateFramebuffer returned 0
+Loading shaders...
+vs_code=0x7fff925f2d20 vs_size=1504, fs_code=0x7fff92614da0 fs_size=572
+Creating shader modules...
+vkCreateShaderModule (vert) returned 0
+vkCreateShaderModule (frag) returned 0
+Creating pipeline layout...
+vkCreatePipelineLayout returned 0
+Creating graphics pipeline...
+vkCreateGraphicsPipelines returned 0
+Creating command pool...
+vkCreateCommandPool returned 0
+Allocating command buffer...
+vkAllocateCommandBuffers returned 0
+Creating fence...
+vkCreateFence returned 0
+Starting render...
+Rendered triangle
+Copying rendered content to GBM buffer...
+Copying: VK pitch=5120, GBM stride=5120
+Copied to GBM buffer successfully!
+Setting DRM scanout...
+  crtc_id=36, fb_id=42
+  connector_id=37
+  mode: 1280x800 (1280x800 @ 60Hz)
+drmModeDirtyFB succeeded - buffer marked for display
+drmModeSetCrtc succeeded!
+RGB triangle on blue (5s)
 
-## CRITICAL: Test Is Not Zero-Copy!
+✅ **Display verified**: RGB triangle visible in QEMU window for 5 seconds!
 
-**The current test_tri.c does NOT implement zero-copy.** It creates separate memory:
-
-```c
-// Line 85: Gets GBM fd
-int prime_fd = gbm_bo_get_fd(bo);
-
-// Line 245-247: CLOSES the fd without importing!
-close(prime_fd);  // <-- fd never used for Vulkan import!
-```
-
-The test creates:
-1. GBM buffer (for DRM scanout) - one memory region
-2. Vulkan image with DEVICE_LOCAL memory - **separate** memory region
-
-These are NOT sharing memory, so the triangle rendered to Vulkan is NOT visible on the DRM scanout.
 
 ## Next Steps: Implement Actual Zero-Copy
 
@@ -85,20 +151,19 @@ memcpy(gbm_map, render_ptr, size);
 gbm_bo_unmap(...);
 ```
 
-## Current Challenge: Display Verification
+## Current Challenge: Zero-Copy Path
 
-Since test_tri.c is not doing zero-copy, the QEMU display shows the uninitialized
-GBM buffer (likely black or garbage), not the rendered triangle
+✅ **Display Verified**: Triangle successfully renders and displays via HOST_VISIBLE + copy path
+
+❌ **Zero-Copy Blocked**: Direct GBM→VkImage import fails due to resource ID mismatch
 
 ## Next Steps
 
-### 1. Verify Display Output
-```bash
-# Check if QEMU window shows the triangle
-# Look at QEMU's Cocoa window - should show RGB triangle on blue background
-```
+### 1. ✅ Display Working (DONE)
+Triangle demo successfully displays via HOST_VISIBLE memory + CPU copy path.
+See commit `e5f5f0a880` for details.
 
-### 2. Investigate Memory Sharing
+### 2. Investigate Memory Sharing (For Zero-Copy)
 The current flow:
 ```
 GBM bo (virtio-gpu blob)
@@ -214,8 +279,25 @@ specifying the same handle type. Venus internal buffers don't do this.
 **Impact**: This is a warning, not an error. The operation succeeds but is
 technically non-compliant. May need to fix in Venus buffer creation path.
 
-## To Investigate
+## To Investigate (For Zero-Copy)
+- ✅ ~~drmModeSetCrtc -22 error~~ - FIXED: Use XRGB8888 instead of ARGB8888
 - Check QEMU's virtio-gpu scanout handling for blob resources
 - Trace the full import path from GBM fd to VkDeviceMemory
 - Verify blob resource lifecycle (create, import, scanout)
 - Fix VkExternalMemoryBufferCreateInfo for internal Venus buffers
+- Resolve resource ID mismatch between virtio-gpu blobs and Venus resources
+
+## Working Demos
+
+### test_tri ✅ (HOST_VISIBLE + Copy)
+- **File**: `guest-demos/triangle/test_tri.c`
+- **Status**: Working - displays RGB triangle on blue background
+- **Method**: LINEAR HOST_VISIBLE VkImage → memcpy to GBM XRGB8888 → drmModeSetCrtc
+- **Performance**: ~1 frame (5s display), acceptable for proof-of-concept
+
+### vkcube ❌ (Zero-Copy Attempt)
+- **File**: `guest-demos/vkcube/vkcube_anim.c`
+- **Status**: Fails with VK_ERROR_DEVICE_LOST
+- **Method**: Attempts external memory import (GBM prime FD → VkImage)
+- **Blocker**: Resource ID mismatch
+- **TODO**: Refactor to use HOST_VISIBLE + copy path like test_tri
