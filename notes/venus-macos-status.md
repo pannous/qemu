@@ -117,10 +117,41 @@ Done!
 Both triangle and vkcube demos now work via HOST_VISIBLE + copy path!
 
 ### 2. Performance Analysis
-Current performance is already excellent (273 FPS), but potential improvements:
-- **Bottleneck**: CPU copy from VkImage to GBM (~1.3GB/s at 1280x800x4x273fps)
-- **Profile**: Measure if copy dominates frame time vs rendering
-- **Current approach is sufficient** for most use cases
+
+**Current**: 273 FPS (Venus GPU rendering + GBM blob + drmModeDirtyFB)
+**Previous**: 939 FPS (Venus GPU rendering + DRM dumb buffer, no dirty FB call)
+
+#### Why is the previous version 3.4x faster?
+
+The old version used simpler DRM infrastructure:
+```c
+// Old: DRM dumb buffer (simple linear memory)
+struct drm_mode_create_dumb create = {...};
+void *fbPtr = mmap(...);  // One-time mapping
+// Per-frame:
+memcpy(fbPtr, rtPtr, ...);           // Copy to dumb buffer
+drmModeSetCrtc(...);                 // Display (no drmModeDirtyFB!)
+```
+
+New version uses GBM blobs with extra steps:
+```c
+// New: GBM blob (virtio-gpu resource)
+struct gbm_bo *bo = gbm_bo_create(...);
+// Per-frame:
+void *ptr = gbm_bo_map(...);         // Map per frame
+memcpy(ptr, rtPtr, ...);             // Copy to GBM buffer
+gbm_bo_unmap(...);                   // Unmap per frame
+drmModeDirtyFB(...);                 // Mark dirty (extra syscall!)
+drmModeSetCrtc(...);                 // Display
+```
+
+**Overhead sources:**
+1. **`drmModeDirtyFB` call**: Extra syscall not present in old version
+2. **GBM map/unmap per frame**: More overhead than one-time `mmap()`
+3. **GBM blob infrastructure**: More complex than simple dumb buffers
+4. **Venus protocol overhead**: All Vulkan calls cross virtio boundary
+
+**Conclusion**: For future optimization, consider reverting to DRM dumb buffers (skip `drmModeDirtyFB`) or implement true zero-copy with resource ID fix
 
 ### 3. Zero-Copy Rendering (Future Optimization)
 **Goal**: Import GBM prime FD directly as VkImage, eliminate CPU copy
