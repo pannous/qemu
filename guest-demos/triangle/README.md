@@ -1,11 +1,25 @@
-# Venus Triangle Demo
+# Zero-Copy Vulkan Triangle Demo
 
-Simple RGB triangle rendered via Venus (Vulkan-over-virtio).
+RGB triangle rendered via Venus with **zero-copy** GBM→Vulkan→Scanout.
+
+## Architecture
+
+```
+GBM blob (SCANOUT) ←── import fd ──→ VkImage ←── render
+      │
+      └──→ DRM scanout (same memory, NO COPY!)
+```
+
+1. Create GBM buffer with `GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING`
+2. Get DMA-BUF fd via `gbm_bo_get_fd()`
+3. Import into Vulkan via `VK_EXT_external_memory_dma_buf`
+4. Render directly to imported VkImage
+5. Scanout the GBM buffer - **no memcpy needed!**
 
 ## Files
 
-- `test_tri.c` - Main source (hardcoded triangle vertices in shader)
-- `tri.vert/frag` - GLSL shaders with embedded vertex positions
+- `test_tri.c` - Zero-copy Vulkan demo
+- `tri.vert/frag` - GLSL shaders with embedded vertices
 - `build.sh` - Build script
 
 ## Usage
@@ -15,7 +29,8 @@ Simple RGB triangle rendered via Venus (Vulkan-over-virtio).
 ./test_tri   # Shows triangle for 5 seconds
 ```
 
-## Notes
+## Required Extensions
 
-- Uses GBM buffer (single frame only - GBM can't remap after scanout)
-- For animation, see the vkcube demo which uses DRM dumb buffers
+- `VK_KHR_external_memory_fd`
+- `VK_EXT_external_memory_dma_buf`
+- `VK_EXT_image_drm_format_modifier`
