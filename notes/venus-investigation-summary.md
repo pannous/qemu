@@ -227,3 +227,47 @@ export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib
 # Custom render_server
 export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/build/server/virgl_render_server
 ```
+
+## Animation Loop Fix (2026-01-22)
+
+### Problem
+Animation loops showed black screen even though single-frame rendering worked. The `vkcube_drm.c` with GBM buffers failed after the first frame.
+
+### Root Cause
+**GBM buffer mapping fails when buffer is in use for scanout.** After the first `gbm_bo_map` succeeds and the buffer is displayed via `drmModeSetCrtc`, subsequent `gbm_bo_map` calls return NULL.
+
+```
+Frame 0: gbm_bo_map: 0x7fff75f34000 (success)
+Frame 1: gbm_bo_map: 0 (FAILED)
+Frame 2: gbm_bo_map: 0 (FAILED)
+```
+
+This is expected behavior - virtio-gpu GBM implementation locks buffers during scanout.
+
+### Solution
+Use **DRM dumb buffers** instead of GBM for the framebuffer:
+1. Create dumb buffer: `DRM_IOCTL_MODE_CREATE_DUMB`
+2. Map once and keep mapped: `DRM_IOCTL_MODE_MAP_DUMB` + `mmap()`
+3. Copy Vulkan render target to dumb buffer each frame
+4. Display via `drmModeSetCrtc()`
+
+Dumb buffers remain mappable while being displayed.
+
+### Working Demo
+`/root/vkcube_anim.c` - Spinning colored cube at ~1200 fps
+
+### Vulkan Fence Status
+**Fences work correctly!** The earlier investigation notes about fence timeouts were misleading. The actual issue was GBM mapping, not fence signaling.
+
+```
+vkQueueSubmit → VK_SUCCESS
+vkWaitForFences → VK_SUCCESS (fence signals properly)
+vkResetFences → works for subsequent frames
+```
+
+### Test Files (in guest /root/)
+| File | Purpose |
+|------|---------|
+| `loop_test.c` | Proved GBM mapping fails on 2nd frame |
+| `loop_dumb.c` | Proved DRM dumb buffers work for animation |
+| `vkcube_anim.c` | Full spinning cube with DRM dumb buffer |
