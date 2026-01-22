@@ -11,16 +11,15 @@ QEMU_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Paths
 QEMU="${QEMU_DIR}/build/qemu-system-aarch64"
-ISO="/tmp/alpine-virt-3.21.0-aarch64.iso"
-DISK_BACKING="${QEMU_DIR}/alpine-venus-working-20260120.img"
-DISK="/tmp/alpine-overlay.qcow2"
+DISK_BACKING="${QEMU_DIR}/alpine-venus.img"
+DISK="${QEMU_DIR}/alpine-overlay.qcow2"
 
 # Create overlay if missing
 if [[ ! -f "$DISK" ]]; then
     qemu-img create -f qcow2 -b "$DISK_BACKING" -F raw "$DISK"
 fi
 EFI_CODE="/opt/other/redox/tools/firmware/edk2-aarch64-code.fd"
-EFI_VARS="/tmp/alpine-efivars.fd"
+EFI_VARS="${QEMU_DIR}/alpine-efivars.fd"
 
 # MoltenVK ICD - correct path for Homebrew installation
 export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json
@@ -64,7 +63,7 @@ MODE="${1:-run}"
 # HVF acceleration: requires 16KB page kernel!
 # Default 4KB kernel causes HVF to fail (16KB alignment requirement for memory regions)
 # Use QEMU_ACCEL=hvf with QEMU_KERNEL=/path/to/16k-kernel for HVF
-ACCEL="${QEMU_ACCEL:-tcg}"
+ACCEL="${QEMU_ACCEL:-hvf}"
 if [[ "$ACCEL" == "hvf" ]]; then
     ACCEL_OPTS="-accel hvf -cpu host"
     # Warn if not using 16KB kernel
@@ -74,10 +73,19 @@ if [[ "$ACCEL" == "hvf" ]]; then
     fi
 else
     ACCEL_OPTS="-accel tcg -cpu max"
+    echo "Note: Don NOT use TCG acceleration, use HVF!"
+    echo "If you encounter any issues, fix the issues, but do not switch back to TCG"
+    echo "exiting"
+    exit
 fi
 
 # Custom kernel override (for 16KB page kernel)
-CUSTOM_KERNEL="${QEMU_KERNEL:-}"
+# Auto-detect 16KB kernel if not specified
+if [[ -z "${QEMU_KERNEL:-}" && -f "$SCRIPT_DIR/alpine-virt-16k.img" ]]; then
+    CUSTOM_KERNEL="$SCRIPT_DIR/alpine-virt-16k.img"
+else
+    CUSTOM_KERNEL="${QEMU_KERNEL:-}"
+fi
 
 COMMON_OPTS=(
     -M virt $ACCEL_OPTS -m 2G -smp 4
@@ -99,13 +107,13 @@ echo ""
 case "$MODE" in
     install)
         # Install mode: boot from ISO with disk attached
-        KERNEL="/tmp/alpine-boot/boot/vmlinuz-virt"
-        INITRD="/tmp/alpine-boot/boot/initramfs-virt"
+        KERNEL="${QEMU_DIR}/alpine-boot/boot/vmlinuz-virt"
+        INITRD="${QEMU_DIR}/alpine-boot/boot/initramfs-virt"
 
         if [[ ! -f "$KERNEL" ]]; then
             echo "Extracting kernel from ISO..."
-            mkdir -p /tmp/alpine-boot
-            (cd /tmp/alpine-boot && bsdtar -xf "$ISO" boot 2>/dev/null)
+            mkdir -p ${QEMU_DIR}/alpine-boot
+            (cd ${QEMU_DIR}/alpine-boot && bsdtar -xf "$ISO" boot 2>/dev/null)
         fi
 
         echo "Install mode - run 'setup-alpine' in guest to install to disk"
@@ -139,25 +147,25 @@ case "$MODE" in
         fi
 
         # Extract kernel from installed disk if not already done
-        INSTALLED_KERNEL="/tmp/alpine-installed/vmlinuz-virt"
-        INSTALLED_INITRD="/tmp/alpine-installed/initramfs-virt"
+        INSTALLED_KERNEL="${QEMU_DIR}/alpine-installed/vmlinuz-virt"
+        INSTALLED_INITRD="${QEMU_DIR}/alpine-installed/initramfs-virt"
 
         if [[ ! -f "$INSTALLED_KERNEL" ]]; then
             echo "Extracting kernel from installed disk..."
-            mkdir -p /tmp/alpine-installed
+            mkdir -p ${QEMU_DIR}/alpine-installed
             # Mount qcow2 using guestfish/libguestfs or nbd
             if command -v guestfish &>/dev/null; then
                 guestfish --ro -a "$DISK" -m /dev/sda3 \
-                    copy-out /boot/vmlinuz-virt /tmp/alpine-installed/ : \
-                    copy-out /boot/initramfs-virt /tmp/alpine-installed/ 2>/dev/null
+                    copy-out /boot/vmlinuz-virt ${QEMU_DIR}/alpine-installed/ : \
+                    copy-out /boot/initramfs-virt ${QEMU_DIR}/alpine-installed/ 2>/dev/null
             fi
         fi
 
         # Fall back to ISO kernel if extraction failed
         if [[ ! -f "$INSTALLED_KERNEL" ]]; then
             echo "Note: Using ISO kernel (guestfish not available for extraction)"
-            INSTALLED_KERNEL="/tmp/alpine-boot/boot/vmlinuz-virt"
-            INSTALLED_INITRD="/tmp/alpine-boot/boot/initramfs-virt"
+            INSTALLED_KERNEL="${QEMU_DIR}/alpine-boot/boot/vmlinuz-virt"
+            INSTALLED_INITRD="${QEMU_DIR}/alpine-boot/boot/initramfs-virt"
         fi
 
         # Use custom kernel if specified (for 16KB page kernel with HVF)
