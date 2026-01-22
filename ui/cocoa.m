@@ -277,6 +277,116 @@ static int cocoa_keycode_to_qemu(int keycode)
     return mac_to_qkeycode_map[keycode];
 }
 
+/*
+ * Character to QKeyCode mapping for paste-as-keystrokes feature.
+ * Maps ASCII characters to their corresponding QKeyCode and shift state.
+ */
+typedef struct {
+    int qcode;
+    bool shift;
+} CharToKey;
+
+static const CharToKey char_to_key_map[128] = {
+    ['\t'] = { Q_KEY_CODE_TAB, false },
+    ['\n'] = { Q_KEY_CODE_RET, false },
+    ['\r'] = { Q_KEY_CODE_RET, false },
+    [' ']  = { Q_KEY_CODE_SPC, false },
+    ['!']  = { Q_KEY_CODE_1, true },
+    ['"']  = { Q_KEY_CODE_APOSTROPHE, true },
+    ['#']  = { Q_KEY_CODE_3, true },
+    ['$']  = { Q_KEY_CODE_4, true },
+    ['%']  = { Q_KEY_CODE_5, true },
+    ['&']  = { Q_KEY_CODE_7, true },
+    ['\''] = { Q_KEY_CODE_APOSTROPHE, false },
+    ['(']  = { Q_KEY_CODE_9, true },
+    [')']  = { Q_KEY_CODE_0, true },
+    ['*']  = { Q_KEY_CODE_8, true },
+    ['+']  = { Q_KEY_CODE_EQUAL, true },
+    [',']  = { Q_KEY_CODE_COMMA, false },
+    ['-']  = { Q_KEY_CODE_MINUS, false },
+    ['.']  = { Q_KEY_CODE_DOT, false },
+    ['/']  = { Q_KEY_CODE_SLASH, false },
+    ['0']  = { Q_KEY_CODE_0, false },
+    ['1']  = { Q_KEY_CODE_1, false },
+    ['2']  = { Q_KEY_CODE_2, false },
+    ['3']  = { Q_KEY_CODE_3, false },
+    ['4']  = { Q_KEY_CODE_4, false },
+    ['5']  = { Q_KEY_CODE_5, false },
+    ['6']  = { Q_KEY_CODE_6, false },
+    ['7']  = { Q_KEY_CODE_7, false },
+    ['8']  = { Q_KEY_CODE_8, false },
+    ['9']  = { Q_KEY_CODE_9, false },
+    [':']  = { Q_KEY_CODE_SEMICOLON, true },
+    [';']  = { Q_KEY_CODE_SEMICOLON, false },
+    ['<']  = { Q_KEY_CODE_COMMA, true },
+    ['=']  = { Q_KEY_CODE_EQUAL, false },
+    ['>']  = { Q_KEY_CODE_DOT, true },
+    ['?']  = { Q_KEY_CODE_SLASH, true },
+    ['@']  = { Q_KEY_CODE_2, true },
+    ['A']  = { Q_KEY_CODE_A, true },
+    ['B']  = { Q_KEY_CODE_B, true },
+    ['C']  = { Q_KEY_CODE_C, true },
+    ['D']  = { Q_KEY_CODE_D, true },
+    ['E']  = { Q_KEY_CODE_E, true },
+    ['F']  = { Q_KEY_CODE_F, true },
+    ['G']  = { Q_KEY_CODE_G, true },
+    ['H']  = { Q_KEY_CODE_H, true },
+    ['I']  = { Q_KEY_CODE_I, true },
+    ['J']  = { Q_KEY_CODE_J, true },
+    ['K']  = { Q_KEY_CODE_K, true },
+    ['L']  = { Q_KEY_CODE_L, true },
+    ['M']  = { Q_KEY_CODE_M, true },
+    ['N']  = { Q_KEY_CODE_N, true },
+    ['O']  = { Q_KEY_CODE_O, true },
+    ['P']  = { Q_KEY_CODE_P, true },
+    ['Q']  = { Q_KEY_CODE_Q, true },
+    ['R']  = { Q_KEY_CODE_R, true },
+    ['S']  = { Q_KEY_CODE_S, true },
+    ['T']  = { Q_KEY_CODE_T, true },
+    ['U']  = { Q_KEY_CODE_U, true },
+    ['V']  = { Q_KEY_CODE_V, true },
+    ['W']  = { Q_KEY_CODE_W, true },
+    ['X']  = { Q_KEY_CODE_X, true },
+    ['Y']  = { Q_KEY_CODE_Y, true },
+    ['Z']  = { Q_KEY_CODE_Z, true },
+    ['[']  = { Q_KEY_CODE_BRACKET_LEFT, false },
+    ['\\'] = { Q_KEY_CODE_BACKSLASH, false },
+    [']']  = { Q_KEY_CODE_BRACKET_RIGHT, false },
+    ['^']  = { Q_KEY_CODE_6, true },
+    ['_']  = { Q_KEY_CODE_MINUS, true },
+    ['`']  = { Q_KEY_CODE_GRAVE_ACCENT, false },
+    ['a']  = { Q_KEY_CODE_A, false },
+    ['b']  = { Q_KEY_CODE_B, false },
+    ['c']  = { Q_KEY_CODE_C, false },
+    ['d']  = { Q_KEY_CODE_D, false },
+    ['e']  = { Q_KEY_CODE_E, false },
+    ['f']  = { Q_KEY_CODE_F, false },
+    ['g']  = { Q_KEY_CODE_G, false },
+    ['h']  = { Q_KEY_CODE_H, false },
+    ['i']  = { Q_KEY_CODE_I, false },
+    ['j']  = { Q_KEY_CODE_J, false },
+    ['k']  = { Q_KEY_CODE_K, false },
+    ['l']  = { Q_KEY_CODE_L, false },
+    ['m']  = { Q_KEY_CODE_M, false },
+    ['n']  = { Q_KEY_CODE_N, false },
+    ['o']  = { Q_KEY_CODE_O, false },
+    ['p']  = { Q_KEY_CODE_P, false },
+    ['q']  = { Q_KEY_CODE_Q, false },
+    ['r']  = { Q_KEY_CODE_R, false },
+    ['s']  = { Q_KEY_CODE_S, false },
+    ['t']  = { Q_KEY_CODE_T, false },
+    ['u']  = { Q_KEY_CODE_U, false },
+    ['v']  = { Q_KEY_CODE_V, false },
+    ['w']  = { Q_KEY_CODE_W, false },
+    ['x']  = { Q_KEY_CODE_X, false },
+    ['y']  = { Q_KEY_CODE_Y, false },
+    ['z']  = { Q_KEY_CODE_Z, false },
+    ['{']  = { Q_KEY_CODE_BRACKET_LEFT, true },
+    ['|']  = { Q_KEY_CODE_BACKSLASH, true },
+    ['}']  = { Q_KEY_CODE_BRACKET_RIGHT, true },
+    ['~']  = { Q_KEY_CODE_GRAVE_ACCENT, true },
+};
+
 /* Displays an alert dialog box with the specified message */
 static void QEMU_Alert(NSString *message)
 {
@@ -1269,6 +1379,55 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         qemu_input_queue_btn(dcl.con, INPUT_BUTTON_MIDDLE, false);
     });
 }
+
+/*
+ * Paste clipboard text as keystrokes into the guest.
+ * This types each character as individual key presses.
+ */
+- (void) pasteAsKeystrokes:(id)sender
+{
+    NSString *text = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+    if (!text || [text length] == 0) {
+        return;
+    }
+
+    with_bql(^{
+        /* First release any held modifiers to start clean */
+        qkbd_state_key_event(kbd, Q_KEY_CODE_SHIFT, false);
+        qkbd_state_key_event(kbd, Q_KEY_CODE_CTRL, false);
+        qkbd_state_key_event(kbd, Q_KEY_CODE_ALT, false);
+        qkbd_state_key_event(kbd, Q_KEY_CODE_META_L, false);
+
+        for (NSUInteger i = 0; i < [text length]; i++) {
+            unichar c = [text characterAtIndex:i];
+
+            /* Skip non-ASCII characters */
+            if (c >= 128) {
+                continue;
+            }
+
+            CharToKey mapping = char_to_key_map[c];
+            if (mapping.qcode == 0 && c != '\t' && c != '\n' && c != '\r') {
+                /* No mapping for this character */
+                continue;
+            }
+
+            /* Press shift if needed */
+            if (mapping.shift) {
+                qkbd_state_key_event(kbd, Q_KEY_CODE_SHIFT, true);
+            }
+
+            /* Press and release the key */
+            qkbd_state_key_event(kbd, mapping.qcode, true);
+            qkbd_state_key_event(kbd, mapping.qcode, false);
+
+            /* Release shift if it was pressed */
+            if (mapping.shift) {
+                qkbd_state_key_event(kbd, Q_KEY_CODE_SHIFT, false);
+            }
+        }
+    });
+}
 @end
 
 
@@ -1764,6 +1923,16 @@ static void create_initial_menus(void)
     [menuItem setSubmenu:menu];
     [[NSApp mainMenu] addItem:menuItem];
     [NSApp performSelector:@selector(setAppleMenu:) withObject:menu]; // Workaround (this method is private since 10.4+)
+
+    // Edit menu
+    menu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    menuItem = [[[NSMenuItem alloc] initWithTitle:@"Paste as Keystrokes" action:@selector(pasteAsKeystrokes:) keyEquivalent:@"v"] autorelease];
+    [menuItem setKeyEquivalentModifierMask:(NSEventModifierFlagShift|NSEventModifierFlagCommand)];
+    [menuItem setTarget:cocoaView];
+    [menu addItem:menuItem];
+    menuItem = [[[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""] autorelease];
+    [menuItem setSubmenu:menu];
+    [[NSApp mainMenu] addItem:menuItem];
 
     // Machine menu
     menu = [[NSMenu alloc] initWithTitle: @"Machine"];
