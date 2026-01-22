@@ -4,6 +4,14 @@
 #   clean - Full clean rebuild (removes build directory)
 #   quick - Incremental build (default)
 
+                                                
+echo "  - Target: aarch64-softmmu                                                                                                "
+echo " - HVF acceleration enabled                                                                                               "
+echo "- VirGL/Venus enabled                                                                                                    "
+echo "- VirtFS (9P) enabled                                                                                                    "
+echo "- FUSE disabled (macOS API incompatibility)                                                               "               
+echo "- Uses macOS native ar/ranlib (critical - GNU ar creates incompatible archives)   "
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
