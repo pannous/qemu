@@ -1,0 +1,12 @@
+[workspace]
+members = ["common", "triangle", "vkcube"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["QEMU Guest Demo"]
+
+[workspace.dependencies]
+ash = "0.38"
+libc = "0.2"

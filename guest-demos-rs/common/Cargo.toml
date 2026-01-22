@@ -1,0 +1,8 @@
+[package]
+name = "vk-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ash = { workspace = true }
+libc = { workspace = true }
