@@ -20,18 +20,69 @@ test_tri:     Renders triangle successfully
 
 The "Cannot copy" error is **expected** - it's a CPU readback fallback that doesn't work for DEVICE_LOCAL memory. The actual GPU rendering completes successfully.
 
+## CRITICAL: Test Is Not Zero-Copy!
+
+**The current test_tri.c does NOT implement zero-copy.** It creates separate memory:
+
+```c
+// Line 85: Gets GBM fd
+int prime_fd = gbm_bo_get_fd(bo);
+
+// Line 245-247: CLOSES the fd without importing!
+close(prime_fd);  // <-- fd never used for Vulkan import!
+```
+
+The test creates:
+1. GBM buffer (for DRM scanout) - one memory region
+2. Vulkan image with DEVICE_LOCAL memory - **separate** memory region
+
+These are NOT sharing memory, so the triangle rendered to Vulkan is NOT visible on the DRM scanout.
+
+## Next Steps: Implement Actual Zero-Copy
+
+### Option 1: Import GBM fd as Vulkan Memory (True Zero-Copy)
+
+Modify test_tri.c to import the GBM prime_fd:
+
+```c
+// Instead of closing prime_fd, import it as Vulkan memory
+VkImportMemoryFdInfoKHR import_info = {
+    .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    .fd = prime_fd
+};
+
+VkMemoryAllocateInfo alloc_info = {
+    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    .pNext = &import_info,
+    .allocationSize = mem_req.size,
+    .memoryTypeIndex = mem_type
+};
+
+VkDeviceMemory render_mem;
+vkAllocateMemory(device, &alloc_info, NULL, &render_mem);
+// fd ownership transfers to Vulkan - don't close it!
+```
+
+### Option 2: Use HOST_VISIBLE Memory + CPU Copy
+
+Keep current approach but force HOST_VISIBLE memory and copy to GBM:
+
+```c
+// Use HOST_VISIBLE memory type
+uint32_t mem_type = find_mem(&mem_props, mem_req.memoryTypeBits,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+// After rendering, copy to GBM
+void *gbm_map = gbm_bo_map(...);
+memcpy(gbm_map, render_ptr, size);
+gbm_bo_unmap(...);
+```
+
 ## Current Challenge: Display Verification
 
-The triangle renders to a VkImage backed by a GBM buffer, but we need to verify:
-
-1. **Is the rendered content actually visible on QEMU's display?**
-   - The DRM framebuffer is set via `drmModeSetCrtc()`
-   - But we can't visually verify from SSH
-
-2. **Memory type issue**:
-   - Image memory is DEVICE_LOCAL (type 0), not HOST_VISIBLE
-   - This is correct for GPU rendering, but means no CPU access
-   - The GBM→Vulkan import path may not be sharing the same backing memory
+Since test_tri.c is not doing zero-copy, the QEMU display shows the uninitialized
+GBM buffer (likely black or garbage), not the rendered triangle
 
 ## Next Steps
 
@@ -113,6 +164,33 @@ GBM buffer (SCANOUT)
 2. **Scanout path**: When `drmModeSetCrtc()` is called with the GBM fb_id, does QEMU's virtio-gpu actually display it?
 
 3. **Memory type mismatch**: Guest allocates DEVICE_LOCAL (for GPU perf), but SHM fallback uses HOST_VISIBLE. Are they compatible?
+
+## Current Blocker: Resource ID Mismatch
+
+When trying to import GBM fd as Vulkan memory:
+```
+vkr: failed to import resource: invalid res_id 25
+vkr: vkAllocateMemory resulted in CS error
+```
+
+**Root Cause**: The GBM buffer is created as a virtio-gpu blob resource, but when
+the Mesa Venus driver tries to import it, it generates a resource ID that doesn't
+exist in the virglrenderer Venus context.
+
+**Why This Happens**:
+1. Guest creates GBM buffer via virtio-gpu → creates blob resource (e.g., ID 25)
+2. Guest calls `gbm_bo_get_fd()` → returns fd 6
+3. Guest calls `vkAllocateMemory` with `VkImportMemoryFdInfoKHR(fd=6)`
+4. Mesa Venus driver intercepts → creates `VkImportMemoryResourceInfoMESA(resourceId=25)`
+5. virglrenderer's `vkr_context_get_resource(ctx, 25)` → returns NULL (not found!)
+
+The issue is that virtio-gpu resources and Venus resources are in separate namespaces.
+The Venus context doesn't know about virtio-gpu blob resources.
+
+**Possible Fixes**:
+1. **Resource sharing**: Make Venus aware of virtio-gpu blob resources
+2. **Different import path**: Use `VK_EXT_external_memory_host` directly with mmap'd GBM fd
+3. **QEMU integration**: Have QEMU register virtio-gpu blobs with virglrenderer Venus context
 
 ## Known Issues
 

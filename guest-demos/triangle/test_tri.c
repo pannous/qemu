@@ -11,6 +11,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <gbm.h>
@@ -41,11 +42,23 @@ static uint32_t *load_spv(const char *path, size_t *size) {
 }
 
 int main(void) {
+    printf("Starting...\n"); fflush(stdout);
+
     // === DRM/GBM Setup ===
     int drm_fd = open("/dev/dri/card0", O_RDWR);
     if (drm_fd < 0) { perror("open /dev/dri/card0"); return 1; }
+    printf("Opened DRM fd=%d\n", drm_fd); fflush(stdout);
+
+    // Become DRM master (needed for modesetting)
+    if (drmSetMaster(drm_fd) < 0) {
+        printf("Warning: drmSetMaster failed: %s (continuing anyway)\n", strerror(errno));
+    } else {
+        printf("Became DRM master\n");
+    }
+    fflush(stdout);
 
     drmModeRes *res = drmModeGetResources(drm_fd);
+    printf("Got resources res=%p\n", (void*)res); fflush(stdout);
     drmModeConnector *conn = NULL;
     for (int i = 0; i < res->count_connectors; i++) {
         conn = drmModeGetConnector(drm_fd, res->connectors[i]);
@@ -54,35 +67,48 @@ int main(void) {
         conn = NULL;
     }
     if (!conn) { printf("No connected display\n"); return 1; }
+    printf("Found connector\n"); fflush(stdout);
 
     drmModeModeInfo *mode = &conn->modes[0];
     uint32_t W = mode->hdisplay, H = mode->vdisplay;
-    printf("Display: %ux%u\n", W, H);
+    printf("Display: %ux%u\n", W, H); fflush(stdout);
 
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
+    printf("Got encoder, crtc_id=%u\n", crtc_id); fflush(stdout);
 
     // Create GBM device and scanout buffer
+    printf("Creating GBM device...\n"); fflush(stdout);
     struct gbm_device *gbm = gbm_create_device(drm_fd);
+    printf("GBM device=%p\n", (void*)gbm); fflush(stdout);
+    printf("Creating GBM bo...\n"); fflush(stdout);
     struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_ARGB8888,
                                        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    printf("GBM bo=%p\n", (void*)bo); fflush(stdout);
     if (!bo) { printf("Failed to create GBM buffer\n"); return 1; }
 
+    printf("Getting stride...\n"); fflush(stdout);
     uint32_t stride = gbm_bo_get_stride(bo);
+    printf("stride=%u\n", stride); fflush(stdout);
+    printf("Getting fd...\n"); fflush(stdout);
     int prime_fd = gbm_bo_get_fd(bo);
-    printf("GBM blob: stride=%u, prime_fd=%d\n", stride, prime_fd);
+    printf("GBM blob: stride=%u, prime_fd=%d\n", stride, prime_fd); fflush(stdout);
 
     // Create DRM framebuffer from GBM buffer
+    printf("Creating DRM framebuffer...\n"); fflush(stdout);
     uint32_t fb_id;
     uint32_t handles[4] = { gbm_bo_get_handle(bo).u32, 0, 0, 0 };
     uint32_t strides[4] = { stride, 0, 0, 0 };
     uint32_t offsets[4] = { 0, 0, 0, 0 };
+    printf("handle=%u\n", handles[0]); fflush(stdout);
     if (drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_ARGB8888, handles, strides, offsets, &fb_id, 0)) {
         printf("Failed to create framebuffer\n");
         return 1;
     }
+    printf("Created framebuffer fb_id=%u\n", fb_id); fflush(stdout);
 
     // === Vulkan Setup with External Memory ===
+    printf("Creating Vulkan instance...\n"); fflush(stdout);
     const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
     VkInstanceCreateInfo inst_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -90,25 +116,32 @@ int main(void) {
         .ppEnabledExtensionNames = inst_exts
     };
     VkInstance instance;
-    VK_CHECK(vkCreateInstance(&inst_info, NULL, &instance));
+    VkResult res_inst = vkCreateInstance(&inst_info, NULL, &instance);
+    printf("vkCreateInstance returned %d\n", res_inst); fflush(stdout);
+    if (res_inst != VK_SUCCESS) { printf("VK err %d @ instance creation\n", res_inst); return 1; }
 
+    printf("Enumerating physical devices...\n"); fflush(stdout);
     uint32_t gpu_count = 1;
     VkPhysicalDevice gpu;
-    vkEnumeratePhysicalDevices(instance, &gpu_count, &gpu);
+    VkResult res_enum = vkEnumeratePhysicalDevices(instance, &gpu_count, &gpu);
+    printf("vkEnumeratePhysicalDevices returned %d, count=%u\n", res_enum, gpu_count); fflush(stdout);
 
+    printf("Getting device properties...\n"); fflush(stdout);
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(gpu, &props);
-    printf("GPU: %s\n", props.deviceName);
+    printf("GPU: %s\n", props.deviceName); fflush(stdout);
 
+    printf("Getting memory properties...\n"); fflush(stdout);
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(gpu, &mem_props);
+    printf("Memory types: %u, heaps: %u\n", mem_props.memoryTypeCount, mem_props.memoryHeapCount); fflush(stdout);
 
     // Create device with external memory extensions
+    printf("Creating device...\n"); fflush(stdout);
     const char *dev_exts[] = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
-        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
     };
     float qp = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {
@@ -120,88 +153,105 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queue_info,
-        .enabledExtensionCount = 4,
+        .enabledExtensionCount = 3,
         .ppEnabledExtensionNames = dev_exts
     };
     VkDevice device;
-    VK_CHECK(vkCreateDevice(gpu, &dev_info, NULL, &device));
+    VkResult res_dev = vkCreateDevice(gpu, &dev_info, NULL, &device);
+    printf("vkCreateDevice returned %d\n", res_dev); fflush(stdout);
+    if (res_dev != VK_SUCCESS) { printf("VK err %d @ device creation\n", res_dev); return 1; }
 
+    printf("Getting device queue...\n"); fflush(stdout);
     VkQueue queue;
     vkGetDeviceQueue(device, 0, 0, &queue);
+    printf("Queue=%p\n", (void*)queue); fflush(stdout);
 
     // === Import GBM buffer as VkImage (ZERO-COPY!) ===
+    printf("Creating VkImage...\n"); fflush(stdout);
 
-    // Get DRM format modifier from GBM
-    uint64_t modifier = gbm_bo_get_modifier(bo);
-    printf("DRM modifier: 0x%llx\n", (unsigned long long)modifier);
-
-    // Create VkImage with external memory and DRM format modifier
-    VkSubresourceLayout plane_layout = {
-        .offset = 0,
-        .size = 0,  // Derived from image
-        .rowPitch = stride,
-        .arrayPitch = 0,
-        .depthPitch = 0
-    };
-
-    VkImageDrmFormatModifierExplicitCreateInfoEXT drm_info = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-        .drmFormatModifier = modifier,
-        .drmFormatModifierPlaneCount = 1,
-        .pPlaneLayouts = &plane_layout
-    };
-
-    VkExternalMemoryImageCreateInfo ext_img_info = {
-        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-        .pNext = &drm_info,
-        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
-    };
-
+    // Create image - we'll import the GBM memory separately
     VkImageCreateInfo img_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext = &ext_img_info,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = VK_FORMAT_B8G8R8A8_UNORM,
         .extent = { W, H, 1 },
         .mipLevels = 1,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .tiling = VK_IMAGE_TILING_LINEAR,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
 
     VkImage render_img;
-    VK_CHECK(vkCreateImage(device, &img_info, NULL, &render_img));
+    VkResult res_img = vkCreateImage(device, &img_info, NULL, &render_img);
+    printf("vkCreateImage returned %d\n", res_img); fflush(stdout);
+    if (res_img != VK_SUCCESS) { printf("VK err %d @ image creation\n", res_img); return 1; }
 
-    // Import DMA-BUF fd as VkDeviceMemory
+    // Get memory requirements for the image
+    printf("Getting image memory requirements...\n"); fflush(stdout);
     VkMemoryRequirements mem_req;
     vkGetImageMemoryRequirements(device, render_img, &mem_req);
-    printf("Image memory: size=%llu, alignment=%llu\n",
+    printf("Image memory: size=%llu, alignment=%llu, typeBits=0x%x\n",
            (unsigned long long)mem_req.size,
-           (unsigned long long)mem_req.alignment);
+           (unsigned long long)mem_req.alignment,
+           mem_req.memoryTypeBits); fflush(stdout);
 
-    VkImportMemoryFdInfoKHR import_info = {
-        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-        .fd = prime_fd  // Ownership transferred to Vulkan
-    };
+    // Print memory types
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+        printf("  MemType %u: flags=0x%x heap=%u %s\n", i,
+               mem_props.memoryTypes[i].propertyFlags,
+               mem_props.memoryTypes[i].heapIndex,
+               (mem_req.memoryTypeBits & (1 << i)) ? "(compatible)" : ""); fflush(stdout);
+    }
 
+    // Find HOST_VISIBLE memory type for CPU access (needed for copy to GBM)
+    printf("Finding HOST_VISIBLE memory type...\n"); fflush(stdout);
+    uint32_t mem_type = find_mem(&mem_props, mem_req.memoryTypeBits,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mem_type == UINT32_MAX) {
+        // Fallback to just HOST_VISIBLE
+        mem_type = find_mem(&mem_props, mem_req.memoryTypeBits,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    }
+    if (mem_type == UINT32_MAX) {
+        printf("ERROR: No HOST_VISIBLE memory type found!\n");
+        return 1;
+    }
+    printf("Using memory type: %u (HOST_VISIBLE)\n", mem_type); fflush(stdout);
+
+    // Close the GBM prime_fd - we're not using zero-copy (resource sharing issue)
+    close(prime_fd);
+
+    // Allocate HOST_VISIBLE memory for rendering, then we'll copy to GBM
     VkMemoryAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = &import_info,
         .allocationSize = mem_req.size,
-        .memoryTypeIndex = find_mem(&mem_props, mem_req.memoryTypeBits,
-                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+        .memoryTypeIndex = mem_type
     };
 
     VkDeviceMemory render_mem;
-    VK_CHECK(vkAllocateMemory(device, &alloc_info, NULL, &render_mem));
-    VK_CHECK(vkBindImageMemory(device, render_img, render_mem, 0));
+    VkResult res_alloc = vkAllocateMemory(device, &alloc_info, NULL, &render_mem);
+    printf("vkAllocateMemory returned %d\n", res_alloc); fflush(stdout);
+    if (res_alloc != VK_SUCCESS) { printf("VK err %d @ alloc\n", res_alloc); return 1; }
 
-    printf("Imported GBM buffer into Vulkan (zero-copy)\n");
+    printf("Binding memory...\n"); fflush(stdout);
+    VkResult res_bind = vkBindImageMemory(device, render_img, render_mem, 0);
+    printf("vkBindImageMemory returned %d\n", res_bind); fflush(stdout);
+    if (res_bind != VK_SUCCESS) { printf("VK err %d @ bind\n", res_bind); return 1; }
+
+    // Map the render memory for copying to GBM after rendering
+    printf("Mapping render memory...\n"); fflush(stdout);
+    void *render_ptr = NULL;
+    VkResult res_map = vkMapMemory(device, render_mem, 0, mem_req.size, 0, &render_ptr);
+    printf("vkMapMemory returned %d\n", res_map); fflush(stdout);
+    if (res_map != VK_SUCCESS) { printf("VK err %d @ map\n", res_map); return 1; }
+
+    printf("Done with memory setup (HOST_VISIBLE + copy mode)\n"); fflush(stdout);
 
     // Create image view
+    printf("Creating image view...\n"); fflush(stdout);
     VkImageViewCreateInfo view_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = render_img,
@@ -210,9 +260,12 @@ int main(void) {
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     };
     VkImageView render_view;
-    VK_CHECK(vkCreateImageView(device, &view_info, NULL, &render_view));
+    VkResult res_view = vkCreateImageView(device, &view_info, NULL, &render_view);
+    printf("vkCreateImageView returned %d\n", res_view); fflush(stdout);
+    if (res_view != VK_SUCCESS) { printf("VK err %d @ view\n", res_view); return 1; }
 
     // === Render Pass & Framebuffer ===
+    printf("Creating render pass...\n"); fflush(stdout);
     VkAttachmentDescription att = {
         .format = VK_FORMAT_B8G8R8A8_UNORM,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -235,8 +288,11 @@ int main(void) {
         .pSubpasses = &subpass
     };
     VkRenderPass render_pass;
-    VK_CHECK(vkCreateRenderPass(device, &rp_info, NULL, &render_pass));
+    VkResult res_rp = vkCreateRenderPass(device, &rp_info, NULL, &render_pass);
+    printf("vkCreateRenderPass returned %d\n", res_rp); fflush(stdout);
+    if (res_rp != VK_SUCCESS) { printf("VK err %d @ render pass\n", res_rp); return 1; }
 
+    printf("Creating framebuffer...\n"); fflush(stdout);
     VkFramebufferCreateInfo fb_info = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
         .renderPass = render_pass,
@@ -247,14 +303,19 @@ int main(void) {
         .layers = 1
     };
     VkFramebuffer framebuffer;
-    VK_CHECK(vkCreateFramebuffer(device, &fb_info, NULL, &framebuffer));
+    VkResult res_fb = vkCreateFramebuffer(device, &fb_info, NULL, &framebuffer);
+    printf("vkCreateFramebuffer returned %d\n", res_fb); fflush(stdout);
+    if (res_fb != VK_SUCCESS) { printf("VK err %d @ framebuffer\n", res_fb); return 1; }
 
     // === Pipeline ===
+    printf("Loading shaders...\n"); fflush(stdout);
     size_t vs_size, fs_size;
     uint32_t *vs_code = load_spv("/root/tri.vert.spv", &vs_size);
     uint32_t *fs_code = load_spv("/root/tri.frag.spv", &fs_size);
+    printf("vs_code=%p vs_size=%zu, fs_code=%p fs_size=%zu\n", (void*)vs_code, vs_size, (void*)fs_code, fs_size); fflush(stdout);
     if (!vs_code || !fs_code) { printf("Failed to load shaders\n"); return 1; }
 
+    printf("Creating shader modules...\n"); fflush(stdout);
     VkShaderModuleCreateInfo vs_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = vs_size,
@@ -266,12 +327,19 @@ int main(void) {
         .pCode = fs_code
     };
     VkShaderModule vs_mod, fs_mod;
-    VK_CHECK(vkCreateShaderModule(device, &vs_info, NULL, &vs_mod));
-    VK_CHECK(vkCreateShaderModule(device, &fs_info, NULL, &fs_mod));
+    VkResult res_vs = vkCreateShaderModule(device, &vs_info, NULL, &vs_mod);
+    printf("vkCreateShaderModule (vert) returned %d\n", res_vs); fflush(stdout);
+    if (res_vs != VK_SUCCESS) { printf("VK err %d @ vs shader\n", res_vs); return 1; }
+    VkResult res_fs = vkCreateShaderModule(device, &fs_info, NULL, &fs_mod);
+    printf("vkCreateShaderModule (frag) returned %d\n", res_fs); fflush(stdout);
+    if (res_fs != VK_SUCCESS) { printf("VK err %d @ fs shader\n", res_fs); return 1; }
 
+    printf("Creating pipeline layout...\n"); fflush(stdout);
     VkPipelineLayoutCreateInfo layout_info = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     VkPipelineLayout pipeline_layout;
-    VK_CHECK(vkCreatePipelineLayout(device, &layout_info, NULL, &pipeline_layout));
+    VkResult res_layout = vkCreatePipelineLayout(device, &layout_info, NULL, &pipeline_layout);
+    printf("vkCreatePipelineLayout returned %d\n", res_layout); fflush(stdout);
+    if (res_layout != VK_SUCCESS) { printf("VK err %d @ layout\n", res_layout); return 1; }
 
     VkPipelineShaderStageCreateInfo stages[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -308,6 +376,7 @@ int main(void) {
         .pAttachments = &cba
     };
 
+    printf("Creating graphics pipeline...\n"); fflush(stdout);
     VkGraphicsPipelineCreateInfo pi = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 2, .pStages = stages,
@@ -321,13 +390,19 @@ int main(void) {
         .renderPass = render_pass
     };
     VkPipeline pipeline;
-    VK_CHECK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline));
+    VkResult res_pipe = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline);
+    printf("vkCreateGraphicsPipelines returned %d\n", res_pipe); fflush(stdout);
+    if (res_pipe != VK_SUCCESS) { printf("VK err %d @ pipeline\n", res_pipe); return 1; }
 
     // === Command Buffer ===
+    printf("Creating command pool...\n"); fflush(stdout);
     VkCommandPoolCreateInfo pool_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     VkCommandPool cmd_pool;
-    VK_CHECK(vkCreateCommandPool(device, &pool_info, NULL, &cmd_pool));
+    VkResult res_pool = vkCreateCommandPool(device, &pool_info, NULL, &cmd_pool);
+    printf("vkCreateCommandPool returned %d\n", res_pool); fflush(stdout);
+    if (res_pool != VK_SUCCESS) { printf("VK err %d @ cmd pool\n", res_pool); return 1; }
 
+    printf("Allocating command buffer...\n"); fflush(stdout);
     VkCommandBufferAllocateInfo cmd_alloc = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = cmd_pool,
@@ -335,13 +410,19 @@ int main(void) {
         .commandBufferCount = 1
     };
     VkCommandBuffer cmd;
-    VK_CHECK(vkAllocateCommandBuffers(device, &cmd_alloc, &cmd));
+    VkResult res_cmd = vkAllocateCommandBuffers(device, &cmd_alloc, &cmd);
+    printf("vkAllocateCommandBuffers returned %d\n", res_cmd); fflush(stdout);
+    if (res_cmd != VK_SUCCESS) { printf("VK err %d @ cmd alloc\n", res_cmd); return 1; }
 
+    printf("Creating fence...\n"); fflush(stdout);
     VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VkFence fence;
-    VK_CHECK(vkCreateFence(device, &fence_info, NULL, &fence));
+    VkResult res_fence = vkCreateFence(device, &fence_info, NULL, &fence);
+    printf("vkCreateFence returned %d\n", res_fence); fflush(stdout);
+    if (res_fence != VK_SUCCESS) { printf("VK err %d @ fence\n", res_fence); return 1; }
 
     // === Render ===
+    printf("Starting render...\n"); fflush(stdout);
     VkCommandBufferBeginInfo begin = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(cmd, &begin);
 
@@ -369,13 +450,64 @@ int main(void) {
     VK_CHECK(vkQueueSubmit(queue, 1, &submit, fence));
     VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
 
-    printf("Rendered to GBM buffer (zero-copy)\n");
+    printf("Rendered triangle\n"); fflush(stdout);
 
-    // === Scanout - NO COPY NEEDED! ===
-    // The GBM buffer IS the render target, just flip it to display
-    drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
+    // Copy from Vulkan render buffer to GBM scanout buffer
+    printf("Copying rendered content to GBM buffer...\n"); fflush(stdout);
+    void *gbm_map_data = NULL;
+    uint32_t gbm_stride;
+    void *gbm_ptr = gbm_bo_map(bo, 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbm_stride, &gbm_map_data);
+    if (gbm_ptr) {
+        // Get Vulkan image layout
+        VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+        VkSubresourceLayout layout;
+        vkGetImageSubresourceLayout(device, render_img, &subres, &layout);
 
-    printf("RGB triangle on blue - zero-copy scanout! (5s)\n");
+        printf("Copying: VK pitch=%llu, GBM stride=%u\n",
+               (unsigned long long)layout.rowPitch, gbm_stride);
+
+        // Copy row by row (may have different pitches)
+        for (uint32_t y = 0; y < H; y++) {
+            memcpy((char*)gbm_ptr + y * gbm_stride,
+                   (char*)render_ptr + layout.offset + y * layout.rowPitch,
+                   W * 4);
+        }
+        gbm_bo_unmap(bo, gbm_map_data);
+        printf("Copied to GBM buffer successfully!\n");
+    } else {
+        printf("ERROR: Failed to map GBM buffer for copy!\n");
+    }
+    fflush(stdout);
+
+    // Scanout the GBM buffer - use various methods to display
+    printf("Setting DRM scanout...\n");
+    printf("  crtc_id=%u, fb_id=%u\n", crtc_id, fb_id);
+    printf("  connector_id=%u\n", conn->connector_id);
+    printf("  mode: %s (%ux%u @ %uHz)\n", mode->name, mode->hdisplay, mode->vdisplay, mode->vrefresh);
+    fflush(stdout);
+
+    int ret = -1;
+
+    // Method 1: Try drmModeDirtyFB to mark the framebuffer as dirty
+    // This tells the display to refresh from the framebuffer
+    drmModeClip clip = { 0, 0, W, H };
+    ret = drmModeDirtyFB(drm_fd, fb_id, &clip, 1);
+    if (ret == 0) {
+        printf("drmModeDirtyFB succeeded - buffer marked for display\n");
+    } else {
+        printf("drmModeDirtyFB returned %d: %s\n", ret, strerror(errno));
+    }
+
+    // Method 2: Try drmModeSetCrtc
+    ret = drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
+    if (ret == 0) {
+        printf("drmModeSetCrtc succeeded!\n");
+    } else {
+        printf("drmModeSetCrtc returned %d: %s\n", ret, strerror(errno));
+    }
+    fflush(stdout);
+
+    printf("RGB triangle on blue (5s)\n"); fflush(stdout);
     sleep(5);
 
     // Cleanup
