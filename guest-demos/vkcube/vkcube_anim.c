@@ -92,7 +92,7 @@ int main(void) {
 
     // Create GBM scanout buffer
     struct gbm_device *gbm = gbm_create_device(drm_fd);
-    struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_ARGB8888,
+    struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
                                        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     uint32_t stride = gbm_bo_get_stride(bo);
     int prime_fd = gbm_bo_get_fd(bo);
@@ -102,7 +102,7 @@ int main(void) {
     uint32_t handles[4] = { gbm_bo_get_handle(bo).u32 };
     uint32_t strides[4] = { stride };
     uint32_t offsets[4] = { 0 };
-    drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_ARGB8888, handles, strides, offsets, &fb_id, 0);
+    drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id, 0);
 
     // === Vulkan with External Memory ===
     const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
