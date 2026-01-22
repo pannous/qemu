@@ -1,5 +1,11 @@
 # Zero-Copy Vulkan Rendering - Status & Next Steps
 
+## Summary
+
+**Current Working Path**: HOST_VISIBLE memory + CPU copy to GBM + drmModeDirtyFB
+
+**True Zero-Copy Blocked By**: virtio-gpu/Venus resource ID mismatch
+
 ## Current State (2025-01-22)
 
 ### Completed ✅
