@@ -1,0 +1,12 @@
+[package]
+name = "triangle"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "test_tri"
+path = "src/main.rs"
+
+[dependencies]
+vk-common = { path = "../common" }
+ash = { workspace = true }

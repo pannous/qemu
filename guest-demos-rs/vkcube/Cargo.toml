@@ -1,0 +1,12 @@
+[package]
+name = "vkcube"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vkcube_anim"
+path = "src/main.rs"
+
+[dependencies]
+vk-common = { path = "../common" }
+ash = { workspace = true }
