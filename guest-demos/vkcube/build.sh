@@ -24,7 +24,7 @@ glslc cube.frag -o cube.frag.spv
 
 # Compile the demo
 echo "Compiling vkcube_anim..."
-gcc -O2 -o vkcube_anim vkcube_anim.c -lvulkan -ldrm -I/usr/include/libdrm -lm
+gcc -O2 -o vkcube_anim vkcube_anim.c -lvulkan -ldrm -I/usr/include/libdrm -lm -lgbm
 
 echo "Build complete!"
 echo "Run with: ./vkcube_anim"
