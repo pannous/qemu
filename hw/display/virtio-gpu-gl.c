@@ -162,6 +162,9 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
     gl->hostptr_map = NULL;
     gl->hostptr_size = 0;
     gl->last_venus_ctx_id = 0;
+    gl->venus_present_timer = NULL;
+    gl->venus_present_scanout_id = 0;
+    gl->venus_present_active = false;
 #endif
 }
 
@@ -196,6 +199,12 @@ static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)
         virtio_gpu_vk_swapchain_destroy(gl->vk_swapchain);
         gl->vk_swapchain = NULL;
     }
+
+    if (gl->venus_present_timer) {
+        timer_free(gl->venus_present_timer);
+        gl->venus_present_timer = NULL;
+    }
+    gl->venus_present_active = false;
 
     if (gl->hostptr_map) {
         munmap(gl->hostptr_map, gl->hostptr_size);

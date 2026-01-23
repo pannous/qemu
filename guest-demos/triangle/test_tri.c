@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdint.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <gbm.h>
@@ -47,6 +48,86 @@ static uint32_t *load_spv(const char *path, size_t *size) {
     fread(data, 1, *size, f);
     fclose(f);
     return data;
+}
+
+static uint32_t get_prop_id(int fd, uint32_t obj_id, uint32_t obj_type, const char *name) {
+    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, obj_id, obj_type);
+    if (!props) {
+        return 0;
+    }
+    uint32_t prop_id = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
+        if (prop && strcmp(prop->name, name) == 0) {
+            prop_id = prop->prop_id;
+            drmModeFreeProperty(prop);
+            break;
+        }
+        drmModeFreeProperty(prop);
+    }
+    drmModeFreeObjectProperties(props);
+    return prop_id;
+}
+
+static uint32_t find_primary_plane(int fd, drmModeRes *res, uint32_t crtc_id) {
+    drmModePlaneRes *plane_res = drmModeGetPlaneResources(fd);
+    if (!plane_res) {
+        return 0;
+    }
+
+    int crtc_index = -1;
+    for (int i = 0; i < res->count_crtcs; i++) {
+        if (res->crtcs[i] == crtc_id) {
+            crtc_index = i;
+            break;
+        }
+    }
+    if (crtc_index < 0) {
+        drmModeFreePlaneResources(plane_res);
+        return 0;
+    }
+    uint32_t crtc_bit = 1u << crtc_index;
+
+    uint32_t best_plane = 0;
+    for (uint32_t i = 0; i < plane_res->count_planes; i++) {
+        uint32_t plane_id = plane_res->planes[i];
+        drmModePlane *plane = drmModeGetPlane(fd, plane_id);
+        if (!plane) {
+            continue;
+        }
+        if (!(plane->possible_crtcs & crtc_bit)) {
+            drmModeFreePlane(plane);
+            continue;
+        }
+
+        uint32_t type_prop = get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type");
+        if (type_prop) {
+            drmModeObjectProperties *props = drmModeObjectGetProperties(fd, plane_id,
+                                                                        DRM_MODE_OBJECT_PLANE);
+            if (props) {
+                for (uint32_t p = 0; p < props->count_props; p++) {
+                    if (props->props[p] == type_prop) {
+                        if (props->prop_values[p] == 1) {
+                            best_plane = plane_id;
+                        }
+                        break;
+                    }
+                }
+                drmModeFreeObjectProperties(props);
+            }
+        }
+
+        if (!best_plane) {
+            best_plane = plane_id;
+        }
+        drmModeFreePlane(plane);
+        if (best_plane) {
+            break;
+        }
+    }
+
+    drmModeFreePlaneResources(plane_res);
+    return best_plane;
 }
 
 int main(void) {
@@ -84,6 +165,12 @@ int main(void) {
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
     printf("Got encoder, crtc_id=%u\n", crtc_id); fflush(stdout);
+
+    drmModeCrtc *orig_crtc = drmModeGetCrtc(drm_fd, crtc_id);
+    if (orig_crtc) {
+        printf("Saved original CRTC buffer_id=%u\n", orig_crtc->buffer_id);
+        fflush(stdout);
+    }
 
     // Create GBM device and scanout buffer
     printf("Creating GBM device...\n"); fflush(stdout);
@@ -470,6 +557,73 @@ int main(void) {
     fflush(stdout);
 
     int ret = -1;
+    uint32_t mode_blob_id = 0;
+    bool atomic_ok = false;
+
+    uint32_t plane_id = find_primary_plane(drm_fd, res, crtc_id);
+    if (plane_id) {
+        drmModeAtomicReq *req = drmModeAtomicAlloc();
+        if (req) {
+            uint32_t conn_crtc = get_prop_id(drm_fd, conn->connector_id,
+                                             DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
+            uint32_t crtc_mode = get_prop_id(drm_fd, crtc_id,
+                                             DRM_MODE_OBJECT_CRTC, "MODE_ID");
+            uint32_t crtc_active = get_prop_id(drm_fd, crtc_id,
+                                               DRM_MODE_OBJECT_CRTC, "ACTIVE");
+            uint32_t plane_fb = get_prop_id(drm_fd, plane_id,
+                                            DRM_MODE_OBJECT_PLANE, "FB_ID");
+            uint32_t plane_crtc = get_prop_id(drm_fd, plane_id,
+                                              DRM_MODE_OBJECT_PLANE, "CRTC_ID");
+            uint32_t plane_src_x = get_prop_id(drm_fd, plane_id,
+                                               DRM_MODE_OBJECT_PLANE, "SRC_X");
+            uint32_t plane_src_y = get_prop_id(drm_fd, plane_id,
+                                               DRM_MODE_OBJECT_PLANE, "SRC_Y");
+            uint32_t plane_src_w = get_prop_id(drm_fd, plane_id,
+                                               DRM_MODE_OBJECT_PLANE, "SRC_W");
+            uint32_t plane_src_h = get_prop_id(drm_fd, plane_id,
+                                               DRM_MODE_OBJECT_PLANE, "SRC_H");
+            uint32_t plane_crtc_x = get_prop_id(drm_fd, plane_id,
+                                                DRM_MODE_OBJECT_PLANE, "CRTC_X");
+            uint32_t plane_crtc_y = get_prop_id(drm_fd, plane_id,
+                                                DRM_MODE_OBJECT_PLANE, "CRTC_Y");
+            uint32_t plane_crtc_w = get_prop_id(drm_fd, plane_id,
+                                                DRM_MODE_OBJECT_PLANE, "CRTC_W");
+            uint32_t plane_crtc_h = get_prop_id(drm_fd, plane_id,
+                                                DRM_MODE_OBJECT_PLANE, "CRTC_H");
+
+            if (conn_crtc && crtc_mode && crtc_active && plane_fb && plane_crtc &&
+                plane_src_x && plane_src_y && plane_src_w && plane_src_h &&
+                plane_crtc_x && plane_crtc_y && plane_crtc_w && plane_crtc_h) {
+                if (drmModeCreatePropertyBlob(drm_fd, mode, sizeof(*mode), &mode_blob_id) == 0) {
+                    drmModeAtomicAddProperty(req, conn->connector_id, conn_crtc, crtc_id);
+                    drmModeAtomicAddProperty(req, crtc_id, crtc_mode, mode_blob_id);
+                    drmModeAtomicAddProperty(req, crtc_id, crtc_active, 1);
+
+                    drmModeAtomicAddProperty(req, plane_id, plane_fb, fb_id);
+                    drmModeAtomicAddProperty(req, plane_id, plane_crtc, crtc_id);
+                    drmModeAtomicAddProperty(req, plane_id, plane_crtc_x, 0);
+                    drmModeAtomicAddProperty(req, plane_id, plane_crtc_y, 0);
+                    drmModeAtomicAddProperty(req, plane_id, plane_crtc_w, W);
+                    drmModeAtomicAddProperty(req, plane_id, plane_crtc_h, H);
+                    drmModeAtomicAddProperty(req, plane_id, plane_src_x, 0);
+                    drmModeAtomicAddProperty(req, plane_id, plane_src_y, 0);
+                    drmModeAtomicAddProperty(req, plane_id, plane_src_w, W << 16);
+                    drmModeAtomicAddProperty(req, plane_id, plane_src_h, H << 16);
+
+                    ret = drmModeAtomicCommit(drm_fd, req,
+                                              DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+                    if (ret == 0) {
+                        atomic_ok = true;
+                        printf("drmModeAtomicCommit succeeded!\n");
+                    } else {
+                        printf("drmModeAtomicCommit returned %d: %s\n",
+                               ret, strerror(errno));
+                    }
+                }
+            }
+            drmModeAtomicFree(req);
+        }
+    }
 
     // Method 1: Try drmModeDirtyFB to mark the framebuffer as dirty
     // This tells the display to refresh from the framebuffer
@@ -481,17 +635,40 @@ int main(void) {
         printf("drmModeDirtyFB returned %d: %s\n", ret, strerror(errno));
     }
 
-    // Method 2: Try drmModeSetCrtc
-    ret = drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
-    if (ret == 0) {
-        printf("drmModeSetCrtc succeeded!\n");
-    } else {
-        printf("drmModeSetCrtc returned %d: %s\n", ret, strerror(errno));
+    if (!atomic_ok) {
+        // Method 2: Try drmModeSetCrtc
+        ret = drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
+        if (ret == 0) {
+            printf("drmModeSetCrtc succeeded!\n");
+        } else {
+            printf("drmModeSetCrtc returned %d: %s\n", ret, strerror(errno));
+        }
     }
     fflush(stdout);
 
     printf("RGB triangle on blue (5s)\n"); fflush(stdout);
     sleep(5);
+
+    if (orig_crtc && orig_crtc->buffer_id) {
+        printf("Restoring original CRTC...\n"); fflush(stdout);
+        ret = drmModeSetCrtc(drm_fd, orig_crtc->crtc_id, orig_crtc->buffer_id,
+                             orig_crtc->x, orig_crtc->y, &conn->connector_id, 1,
+                             &orig_crtc->mode);
+        if (ret == 0) {
+            printf("Restored original CRTC.\n");
+        } else {
+            printf("Restore CRTC failed: %d: %s\n", ret, strerror(errno));
+        }
+        fflush(stdout);
+    }
+
+    if (drmDropMaster(drm_fd) == 0) {
+        printf("Dropped DRM master\n"); fflush(stdout);
+    }
+
+    if (mode_blob_id) {
+        drmModeDestroyPropertyBlob(drm_fd, mode_blob_id);
+    }
 
     // Cleanup
     vkDestroyFence(device, fence, NULL);
@@ -508,6 +685,9 @@ int main(void) {
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
 
+    if (orig_crtc) {
+        drmModeFreeCrtc(orig_crtc);
+    }
     drmModeRmFB(drm_fd, fb_id);
     gbm_bo_destroy(bo);
     gbm_device_destroy(gbm);

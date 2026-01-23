@@ -263,6 +263,9 @@ struct VirtIOGPUGL {
     void *hostptr_map;
     uint64_t hostptr_size;
     uint32_t last_venus_ctx_id;
+    QEMUTimer *venus_present_timer;
+    uint32_t venus_present_scanout_id;
+    bool venus_present_active;
 #endif
 };
 

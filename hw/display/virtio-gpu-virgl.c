@@ -19,6 +19,7 @@
 #include "hw/virtio/virtio-gpu.h"
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
+#include "qemu/timer.h"
 #include "system/hvf.h"
 #include <dlfcn.h>
 #include <stdarg.h>
@@ -53,6 +54,9 @@ struct virtio_gpu_virgl_resource {
     uint32_t scanout_stride;        /* Stride of scanout buffer */
 #endif
 };
+
+static struct virtio_gpu_virgl_resource *
+virtio_gpu_virgl_find_resource(VirtIOGPU *g, uint32_t resource_id);
 
 typedef int (*virgl_renderer_resource_register_venus_fn)(uint32_t ctx_id,
                                                          uint32_t res_id);
@@ -184,6 +188,174 @@ vkr_hostptr_log(const char *fmt, ...)
     fputc('\n', f);
     fclose(f);
 }
+
+#ifdef __APPLE__
+static bool virtio_gpu_venus_present_timer_enabled(void)
+{
+    const char *env = getenv("VKR_PRESENT_TIMER");
+    if (!env) {
+        return true;
+    }
+    if (!strcmp(env, "0") || !strcasecmp(env, "false") || !strcasecmp(env, "off")) {
+        return false;
+    }
+    return true;
+}
+
+static bool
+virtio_gpu_venus_present_scanout(VirtIOGPU *g, uint32_t scanout_id, const char *tag)
+{
+    if (!virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+        return false;
+    }
+
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[scanout_id];
+    struct virtio_gpu_virgl_resource *res =
+        virtio_gpu_virgl_find_resource(g, scanout->resource_id);
+    struct virtio_gpu_framebuffer *fb = &scanout->fb;
+    if (!fb->width || !fb->height || !fb->stride) {
+        vkr_hostptr_log("%s present skip: scanout=%u res_id=%u fb=%ux%u stride=%u",
+                        tag ? tag : "present", scanout_id, scanout->resource_id,
+                        fb->width, fb->height, fb->stride);
+        return false;
+    }
+
+    void *present_data = NULL;
+    uint64_t present_size = 0;
+    uint64_t need = (uint64_t)fb->stride * (uint64_t)fb->height;
+    uint32_t ctx_id = res ? res->ctx_id : 0;
+    if (!ctx_id) {
+        ctx_id = gl->last_venus_ctx_id;
+    }
+    bool used_hostptr = false;
+
+    if (getenv("VKR_PRESENT_HOSTPTR") && ctx_id) {
+        if (virgl_try_get_hostptr_for_size(gl, ctx_id, need,
+                                           &present_data, &present_size) &&
+            present_size >= need) {
+            used_hostptr = true;
+        }
+    }
+
+    if (!used_hostptr) {
+        if (!res) {
+            vkr_hostptr_log("%s present skip: scanout=%u res_id=%u no hostptr and no resource",
+                            tag ? tag : "present", scanout_id, scanout->resource_id);
+            return false;
+        }
+        if (!res->mapped_blob) {
+            void *data = NULL;
+            uint64_t size = 0;
+            int ret = virgl_renderer_resource_map(scanout->resource_id, &data, &size);
+            if (ret == 0 && data) {
+                res->mapped_blob = data;
+                res->mapped_size = size;
+            }
+        }
+        present_data = res->mapped_blob;
+        present_size = res->mapped_size;
+    }
+
+    if (!present_data) {
+        vkr_hostptr_log("%s present skip: scanout=%u res_id=%u no data",
+                        tag ? tag : "present", scanout_id, scanout->resource_id);
+        return false;
+    }
+
+    if (!gl->vk_swapchain) {
+        void *metal_layer = cocoa_get_metal_layer();
+        if (!metal_layer) {
+            cocoa_set_metal_layer_enabled(true);
+            metal_layer = cocoa_get_metal_layer();
+        }
+        if (metal_layer) {
+            gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                              fb->width,
+                                                              fb->height);
+            if (gl->vk_swapchain) {
+                info_report("Venus: Host Vulkan swapchain initialized (%s %ux%u)",
+                            tag ? tag : "present", fb->width, fb->height);
+            }
+        }
+    }
+
+    if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+        uint32_t sw_width, sw_height;
+        virtio_gpu_vk_swapchain_get_size(gl->vk_swapchain, &sw_width, &sw_height);
+        if (sw_width != fb->width || sw_height != fb->height) {
+            virtio_gpu_vk_swapchain_resize(gl->vk_swapchain, fb->width, fb->height);
+        }
+        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, present_data, fb)) {
+            vkr_hostptr_log("%s present: scanout=%u res_id=%u ctx_id=%u hostptr=%d",
+                            tag ? tag : "present", scanout_id, scanout->resource_id,
+                            ctx_id, used_hostptr ? 1 : 0);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void virtio_gpu_venus_present_timer_cb(void *opaque)
+{
+    VirtIOGPUGL *gl = opaque;
+    VirtIOGPU *g = VIRTIO_GPU(gl);
+
+    if (!gl->venus_present_active) {
+        return;
+    }
+
+    uint32_t scanout_id = gl->venus_present_scanout_id;
+    if (!g->parent_obj.scanout[scanout_id].resource_id) {
+        gl->venus_present_active = false;
+        return;
+    }
+
+    vkr_hostptr_log("timer tick: scanout=%u res_id=%u",
+                    scanout_id, g->parent_obj.scanout[scanout_id].resource_id);
+
+    virtio_gpu_venus_present_scanout(g, scanout_id, "timer");
+
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    const char *fps_env = getenv("VKR_PRESENT_FPS");
+    const char *ns_env = getenv("VKR_PRESENT_TIMER_NS");
+    uint64_t interval = 0;
+    if (fps_env && fps_env[0]) {
+        uint64_t fps = strtoull(fps_env, NULL, 10);
+        if (fps) {
+            interval = 1000000000ull / fps;
+        }
+    } else if (ns_env && ns_env[0]) {
+        interval = strtoull(ns_env, NULL, 10);
+    }
+
+    timer_mod_ns(gl->venus_present_timer, now + interval);
+}
+
+static void virtio_gpu_venus_present_start(VirtIOGPU *g, uint32_t scanout_id)
+{
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    if (!gl->venus_present_timer) {
+        gl->venus_present_timer =
+            timer_new_ns(QEMU_CLOCK_REALTIME, virtio_gpu_venus_present_timer_cb, gl);
+    }
+    gl->venus_present_scanout_id = scanout_id;
+    gl->venus_present_active = true;
+    vkr_hostptr_log("timer start: scanout=%u", scanout_id);
+    timer_mod_ns(gl->venus_present_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+}
+
+static void virtio_gpu_venus_present_stop(VirtIOGPU *g)
+{
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    gl->venus_present_active = false;
+    if (gl->venus_present_timer) {
+        timer_del(gl->venus_present_timer);
+    }
+    vkr_hostptr_log("timer stop");
+}
+#endif
 
 static struct virtio_gpu_virgl_resource *
 virtio_gpu_virgl_find_resource(VirtIOGPU *g, uint32_t resource_id)
@@ -680,6 +852,8 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
     VIRTIO_GPU_FILL_CMD(rf);
     trace_virtio_gpu_cmd_res_flush(rf.resource_id,
                                    rf.r.width, rf.r.height, rf.r.x, rf.r.y);
+    vkr_hostptr_log("resource_flush: res_id=%u rect=%ux%u+%u+%u",
+                    rf.resource_id, rf.r.width, rf.r.height, rf.r.x, rf.r.y);
 
     /*
      * Venus-only mode: pixel data is already in the resource's pixman image,
@@ -687,7 +861,85 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
      */
 
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+        bool presented = false;
         if (g->parent_obj.scanout[i].resource_id != rf.resource_id) {
+            continue;
+        }
+#ifdef __APPLE__
+        vkr_hostptr_log("resource_flush: match scanout=%d res_id=%u",
+                        i, rf.resource_id);
+#endif
+#ifdef __APPLE__
+        if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+            VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+            struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[i];
+            struct virtio_gpu_virgl_resource *res = virtio_gpu_virgl_find_resource(g, rf.resource_id);
+            struct virtio_gpu_framebuffer *fb = &scanout->fb;
+
+            if (res && fb->width && fb->height && fb->stride) {
+                void *present_data = NULL;
+                uint64_t present_size = 0;
+                uint64_t need = (uint64_t)fb->stride * (uint64_t)fb->height;
+                uint32_t ctx_id = res->ctx_id ? res->ctx_id : gl->last_venus_ctx_id;
+                bool used_hostptr = false;
+
+                if (getenv("VKR_PRESENT_HOSTPTR") && ctx_id) {
+                    if (virgl_try_get_hostptr_for_size(gl, ctx_id, need,
+                                                       &present_data, &present_size) &&
+                        present_size >= need) {
+                        used_hostptr = true;
+                    }
+                }
+
+                if (!used_hostptr) {
+                    if (!res->mapped_blob) {
+                        void *data = NULL;
+                        uint64_t size = 0;
+                        int ret = virgl_renderer_resource_map(rf.resource_id, &data, &size);
+                        if (ret == 0 && data) {
+                            res->mapped_blob = data;
+                            res->mapped_size = size;
+                        }
+                    }
+                    present_data = res->mapped_blob;
+                    present_size = res->mapped_size;
+                }
+
+                if (present_data) {
+                    if (!gl->vk_swapchain) {
+                        void *metal_layer = cocoa_get_metal_layer();
+                        if (!metal_layer) {
+                            cocoa_set_metal_layer_enabled(true);
+                            metal_layer = cocoa_get_metal_layer();
+                        }
+                        if (metal_layer) {
+                            gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                                              fb->width,
+                                                                              fb->height);
+                            if (gl->vk_swapchain) {
+                                info_report("Venus: Host Vulkan swapchain initialized (flush %ux%u)",
+                                            fb->width, fb->height);
+                            }
+                        }
+                    }
+
+                    if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+                        uint32_t sw_width, sw_height;
+                        virtio_gpu_vk_swapchain_get_size(gl->vk_swapchain, &sw_width, &sw_height);
+                        if (sw_width != fb->width || sw_height != fb->height) {
+                            virtio_gpu_vk_swapchain_resize(gl->vk_swapchain, fb->width, fb->height);
+                        }
+                        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, present_data, fb)) {
+                            vkr_hostptr_log("flush present: res_id=%u ctx_id=%u hostptr=%d",
+                                            rf.resource_id, ctx_id, used_hostptr ? 1 : 0);
+                            presented = true;
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        if (presented) {
             continue;
         }
         virtio_gpu_rect_update(g, i, rf.r.x, rf.r.y, rf.r.width, rf.r.height);
@@ -710,6 +962,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                                      ss.r.width, ss.r.height, ss.r.x, ss.r.y);
     vkr_hostptr_log("set_scanout legacy: scanout_id=%u res_id=%u w=%u h=%u",
                     ss.scanout_id, ss.resource_id, ss.r.width, ss.r.height);
+    vkr_hostptr_log("timer env: %s", getenv("VKR_PRESENT_TIMER") ? getenv("VKR_PRESENT_TIMER") : "null");
 
     if (ss.scanout_id >= g->parent_obj.conf.max_outputs) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: illegal scanout id specified %d",
@@ -717,12 +970,39 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID;
         return;
     }
+    if (ss.resource_id == 0) {
+#ifdef __APPLE__
+        virtio_gpu_venus_present_stop(g);
+#endif
+        virtio_gpu_disable_scanout(g, ss.scanout_id);
+        return;
+    }
     g->parent_obj.enable = 1;
+
+#ifdef __APPLE__
+    {
+        struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+        scanout->fb.width = ss.r.width;
+        scanout->fb.height = ss.r.height;
+        scanout->fb.stride = ss.r.width * 4;
+        scanout->fb.bytes_pp = 4;
+        scanout->fb.format = PIXMAN_x8r8g8b8;
+        scanout->x = ss.r.x;
+        scanout->y = ss.r.y;
+        scanout->width = ss.r.width;
+        scanout->height = ss.r.height;
+    }
+#endif
 
 #ifdef __APPLE__
     /* Prefer host swapchain presentation for Venus on macOS (no OpenGL). */
     if (virtio_gpu_venus_enabled(g->parent_obj.conf) &&
         ss.resource_id && ss.r.width && ss.r.height) {
+        bool timer_enabled = virtio_gpu_venus_present_timer_enabled();
+        vkr_hostptr_log("timer enabled: %d", timer_enabled ? 1 : 0);
+        if (timer_enabled) {
+            virtio_gpu_venus_present_start(g, ss.scanout_id);
+        }
         if (getenv("VKR_PRESENT_HOSTPTR") && gl->last_venus_ctx_id) {
             void *present_data = NULL;
             uint64_t present_size = 0;
@@ -767,7 +1047,13 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                 if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
                     if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain,
                                                         present_data, &fb)) {
-                        g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                        struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+                        scanout->resource_id = ss.resource_id;
+                        scanout->fb = fb;
+                        scanout->x = ss.r.x;
+                        scanout->y = ss.r.y;
+                        scanout->width = ss.r.width;
+                        scanout->height = ss.r.height;
                         return;
                     }
                 } else {
@@ -832,7 +1118,13 @@ legacy_hostptr_fallback:
                     if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
                         if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain,
                                                             res->mapped_blob, &fb)) {
-                            g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                            struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+                            scanout->resource_id = ss.resource_id;
+                            scanout->fb = fb;
+                            scanout->x = ss.r.x;
+                            scanout->y = ss.r.y;
+                            scanout->width = ss.r.width;
+                            scanout->height = ss.r.height;
                             return;
                         } else {
                             vkr_hostptr_log("legacy swapchain: present failed res_id=%u",
@@ -939,9 +1231,11 @@ static void virgl_cmd_submit_3d(VirtIOGPU *g,
     struct virtio_gpu_cmd_submit cs;
     void *buf;
     size_t s;
+    static int submit_log_budget = 5;
 
     VIRTIO_GPU_FILL_CMD(cs);
     trace_virtio_gpu_cmd_ctx_submit(cs.hdr.ctx_id, cs.size);
+    vkr_hostptr_log("submit_3d: ctx_id=%u size=%u", cs.hdr.ctx_id, cs.size);
 
     buf = g_malloc(cs.size);
     s = iov_to_buf(cmd->elem.out_sg, cmd->elem.out_num,
@@ -962,6 +1256,27 @@ static void virgl_cmd_submit_3d(VirtIOGPU *g,
 
 out:
     g_free(buf);
+
+#ifdef __APPLE__
+    if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+        for (uint32_t i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+            struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[i];
+            if (scanout->resource_id) {
+                bool ok = virtio_gpu_venus_present_scanout(g, i, "submit");
+                if (!ok) {
+                    vkr_hostptr_log("submit present skipped: scanout=%u res_id=%u fb=%ux%u stride=%u",
+                                    i, scanout->resource_id,
+                                    scanout->fb.width, scanout->fb.height,
+                                    scanout->fb.stride);
+                } else if (submit_log_budget > 0) {
+                    vkr_hostptr_log("submit present ok: scanout=%u res_id=%u",
+                                    i, scanout->resource_id);
+                    submit_log_budget--;
+                }
+            }
+        }
+    }
+#endif
 }
 
 static void virgl_cmd_transfer_to_host_2d(VirtIOGPU *g,
@@ -1378,6 +1693,9 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     }
 
     if (ss.resource_id == 0) {
+#ifdef __APPLE__
+        virtio_gpu_venus_present_stop(g);
+#endif
         virtio_gpu_disable_scanout(g, ss.scanout_id);
         return;
     }
@@ -1412,6 +1730,9 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 #ifdef __APPLE__
     VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
     vkr_hostptr_log("set_scanout_blob: res_id=%u ctx_id=%u", ss.resource_id, res->ctx_id);
+    if (virtio_gpu_venus_present_timer_enabled()) {
+        virtio_gpu_venus_present_start(g, ss.scanout_id);
+    }
     if (getenv("VKR_USE_IOSURFACE")) {
         uint32_t ios_id = 0;
         if (res->ctx_id &&
@@ -1430,7 +1751,13 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
                 cocoa_set_metal_layer_enabled(true);
                 if (virtio_gpu_present_iosurface(res->iosurface,
                                                  cocoa_get_metal_layer())) {
-                    g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                    struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+                    scanout->resource_id = ss.resource_id;
+                    scanout->fb = fb;
+                    scanout->x = ss.r.x;
+                    scanout->y = ss.r.y;
+                    scanout->width = ss.r.width;
+                    scanout->height = ss.r.height;
                     return;
                 }
             }
@@ -1479,7 +1806,13 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
             cocoa_set_metal_layer_enabled(true);
             if (virtio_gpu_present_iosurface(res->iosurface,
                                              cocoa_get_metal_layer())) {
-                g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+                scanout->resource_id = ss.resource_id;
+                scanout->fb = fb;
+                scanout->x = ss.r.x;
+                scanout->y = ss.r.y;
+                scanout->width = ss.r.width;
+                scanout->height = ss.r.height;
                 return;
             }
         }
@@ -1569,7 +1902,13 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         /* Present the blob via Vulkan swapchain */
         if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, present_data, &fb)) {
             /* Update scanout state for tracking */
-            g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+            struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss.scanout_id];
+            scanout->resource_id = ss.resource_id;
+            scanout->fb = fb;
+            scanout->x = ss.r.x;
+            scanout->y = ss.r.y;
+            scanout->width = ss.r.width;
+            scanout->height = ss.r.height;
             return;
         }
         /* Fall through to software path on swapchain failure */
@@ -1607,6 +1946,7 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     bool cmd_suspended = false;
 
     VIRTIO_GPU_FILL_CMD(cmd->cmd_hdr);
+    vkr_hostptr_log("cmd: type=%u", cmd->cmd_hdr.type);
 
     virgl_renderer_force_ctx_0();
     switch (cmd->cmd_hdr.type) {
@@ -1623,6 +1963,7 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
         virgl_cmd_create_resource_3d(g, cmd);
         break;
     case VIRTIO_GPU_CMD_SUBMIT_3D:
+        vkr_hostptr_log("cmd: submit_3d");
         virgl_cmd_submit_3d(g, cmd);
         break;
     case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D:
@@ -1644,6 +1985,7 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
         virgl_cmd_set_scanout(g, cmd);
         break;
     case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+        vkr_hostptr_log("cmd: resource_flush");
         virgl_cmd_resource_flush(g, cmd);
         break;
     case VIRTIO_GPU_CMD_RESOURCE_UNREF:

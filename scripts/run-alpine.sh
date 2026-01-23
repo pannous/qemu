@@ -40,6 +40,9 @@ export MVK_CONFIG_LOG_LEVEL=2
 # Present from host-visible allocations via host Vulkan swapchain (no guest CPU copy)
 : "${VKR_PRESENT_HOSTPTR:=1}"
 export VKR_PRESENT_HOSTPTR
+# Drive host-side present loop (uncapped by default for max FPS test)
+: "${VKR_PRESENT_TIMER:=1}"
+export VKR_PRESENT_TIMER
 # Force host pointer import even if fd export is available (needed for host-present path)
 : "${VKR_FORCE_HOSTPTR_IMPORT:=1}"
 export VKR_FORCE_HOSTPTR_IMPORT
