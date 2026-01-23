@@ -22,7 +22,6 @@
 #include "qemu/timer.h"
 #include "system/hvf.h"
 #include <dlfcn.h>
-#include <stdarg.h>
 
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
@@ -174,31 +173,13 @@ virgl_try_get_hostptr_for_size(VirtIOGPUGL *gl,
     return true;
 }
 
-static void
-vkr_hostptr_log(const char *fmt, ...)
-{
-    FILE *f = fopen("/tmp/vkr_hostptr.log", "a");
-    if (!f) {
-        return;
-    }
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
+/* Debug logging disabled - zero-copy is now default behavior */
+#define vkr_hostptr_log(...) do { } while (0)
 
 #ifdef __APPLE__
-static bool virtio_gpu_venus_present_timer_enabled(void)
+/* Timer-based present is now always enabled for Venus */
+static inline bool virtio_gpu_venus_present_timer_enabled(void)
 {
-    const char *env = getenv("VKR_PRESENT_TIMER");
-    if (!env) {
-        return true;
-    }
-    if (!strcmp(env, "0") || !strcasecmp(env, "false") || !strcasecmp(env, "off")) {
-        return false;
-    }
     return true;
 }
 
@@ -230,7 +211,7 @@ virtio_gpu_venus_present_scanout(VirtIOGPU *g, uint32_t scanout_id, const char *
     }
     bool used_hostptr = false;
 
-    if (getenv("VKR_PRESENT_HOSTPTR") && ctx_id) {
+    if (ctx_id) {
         if (virgl_try_get_hostptr_for_size(gl, ctx_id, need,
                                            &present_data, &present_size) &&
             present_size >= need) {
@@ -883,7 +864,7 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
                 uint32_t ctx_id = res->ctx_id ? res->ctx_id : gl->last_venus_ctx_id;
                 bool used_hostptr = false;
 
-                if (getenv("VKR_PRESENT_HOSTPTR") && ctx_id) {
+                if (ctx_id) {
                     if (virgl_try_get_hostptr_for_size(gl, ctx_id, need,
                                                        &present_data, &present_size) &&
                         present_size >= need) {
@@ -1003,7 +984,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         if (timer_enabled) {
             virtio_gpu_venus_present_start(g, ss.scanout_id);
         }
-        if (getenv("VKR_PRESENT_HOSTPTR") && gl->last_venus_ctx_id) {
+        if (gl->last_venus_ctx_id) {
             void *present_data = NULL;
             uint64_t present_size = 0;
             uint64_t need = (uint64_t)ss.r.width * (uint64_t)ss.r.height * 4;
@@ -1142,11 +1123,10 @@ legacy_hostptr_fallback:
 #endif
 
     if (ss.resource_id && ss.r.width && ss.r.height) {
-        bool do_gl = true;
 #ifdef __APPLE__
+        /* Prefer host swapchain on macOS - no OpenGL needed for Venus */
         if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
-            /* Avoid OpenGL scanout on macOS Venus path. */
-            do_gl = false;
+            return;
         }
 #endif
 #ifdef CONFIG_OPENGL
@@ -1841,7 +1821,7 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         uint64_t present_size = res->mapped_size;
         bool used_hostptr = false;
 
-        if (getenv("VKR_PRESENT_HOSTPTR") && res->ctx_id) {
+        if (res->ctx_id) {
             /* Present from Venus' last HOST_VISIBLE allocation to avoid guest CPU copies.
              * Alternatives:
              *  - True dmabuf import of the GBM scanout buffer (blocked by res_id mismatch)
