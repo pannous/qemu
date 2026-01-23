@@ -10,7 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QEMU_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Paths
-QEMU="${QEMU_DIR}/build/qemu-system-aarch64"
+QEMU_SIGNED="${QEMU_DIR}/build/qemu-system-aarch64"
+QEMU_UNSIGNED="${QEMU_DIR}/build/qemu-system-aarch64-unsigned"
+QEMU="$QEMU_SIGNED"
 DISK_BACKING="${QEMU_DIR}/alpine-venus.img"
 DISK="${QEMU_DIR}/alpine-overlay.qcow2"
 
@@ -34,6 +36,18 @@ export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/builddir/server/virgl_re
 # Venus/virgl debug (uncomment for troubleshooting)
 export VKR_DEBUG=all
 export MVK_CONFIG_LOG_LEVEL=2
+
+# Present from host-visible allocations via host Vulkan swapchain (no guest CPU copy)
+: "${VKR_PRESENT_HOSTPTR:=1}"
+export VKR_PRESENT_HOSTPTR
+# Force host pointer import even if fd export is available (needed for host-present path)
+: "${VKR_FORCE_HOSTPTR_IMPORT:=1}"
+export VKR_FORCE_HOSTPTR_IMPORT
+# Debug host-present path (prints first pixel/stride)
+: "${VKR_PRESENT_DEBUG:=1}"
+export VKR_PRESENT_DEBUG
+# Ensure IOSurface path doesn't steal presentation from the host swapchain path
+unset VKR_USE_IOSURFACE
 
 # Check QEMU
 if [[ ! -x "$QEMU" ]]; then

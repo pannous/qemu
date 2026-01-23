@@ -259,6 +259,10 @@ struct VirtIOGPUGL {
 #ifdef __APPLE__
     /* Host-side Vulkan swapchain for Venus blob presentation on macOS */
     struct VirtIOGPUVkSwapchain *vk_swapchain;
+    int hostptr_fd;
+    void *hostptr_map;
+    uint64_t hostptr_size;
+    uint32_t last_venus_ctx_id;
 #endif
 };
 

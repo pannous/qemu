@@ -22,6 +22,7 @@
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
 #include "hw/core/qdev-properties.h"
+#include <sys/mman.h>
 
 #include <virglrenderer.h>
 
@@ -122,6 +123,7 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
 {
     ERRP_GUARD();
     VirtIOGPU *g = VIRTIO_GPU(qdev);
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(qdev);
 
 #if HOST_BIG_ENDIAN
     error_setg(errp, "virgl is not supported on bigendian platforms");
@@ -154,6 +156,13 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
 #endif
 
     virtio_gpu_device_realize(qdev, errp);
+
+#ifdef __APPLE__
+    gl->hostptr_fd = -1;
+    gl->hostptr_map = NULL;
+    gl->hostptr_size = 0;
+    gl->last_venus_ctx_id = 0;
+#endif
 }
 
 static const Property virtio_gpu_gl_properties[] = {
@@ -187,6 +196,16 @@ static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)
         virtio_gpu_vk_swapchain_destroy(gl->vk_swapchain);
         gl->vk_swapchain = NULL;
     }
+
+    if (gl->hostptr_map) {
+        munmap(gl->hostptr_map, gl->hostptr_size);
+        gl->hostptr_map = NULL;
+    }
+    if (gl->hostptr_fd >= 0) {
+        close(gl->hostptr_fd);
+        gl->hostptr_fd = -1;
+    }
+    gl->hostptr_size = 0;
 #endif
 
     gl->renderer_state = RS_START;

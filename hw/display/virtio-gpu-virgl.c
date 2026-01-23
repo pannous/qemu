@@ -21,6 +21,7 @@
 #include "hw/virtio/virtio-gpu-pixman.h"
 #include "system/hvf.h"
 #include <dlfcn.h>
+#include <stdarg.h>
 
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
@@ -58,6 +59,9 @@ typedef int (*virgl_renderer_resource_register_venus_fn)(uint32_t ctx_id,
 typedef int (*virgl_renderer_resource_get_iosurface_id_fn)(uint32_t ctx_id,
                                                            uint32_t res_id,
                                                            uint32_t *out_id);
+typedef int (*virgl_renderer_get_last_hostptr_fd_fn)(uint32_t ctx_id,
+                                                     int *out_fd,
+                                                     uint64_t *out_size);
 
 static bool
 virgl_try_register_venus_resource(uint32_t ctx_id, uint32_t res_id)
@@ -103,6 +107,77 @@ virgl_try_get_resource_iosurface_id(uint32_t ctx_id, uint32_t res_id, uint32_t *
     }
 
     return get_fn(ctx_id, res_id, out_id) == 0;
+}
+
+static bool
+virgl_try_get_last_hostptr(VirtIOGPUGL *gl,
+                           uint32_t ctx_id,
+                           void **out_ptr,
+                           uint64_t *out_size)
+{
+    static virgl_renderer_get_last_hostptr_fd_fn get_fn;
+    static bool looked_up;
+    int fd = -1;
+    uint64_t size = 0;
+
+    if (!out_ptr || !out_size) {
+        return false;
+    }
+
+    if (!looked_up) {
+        get_fn = (virgl_renderer_get_last_hostptr_fd_fn)dlsym(
+            RTLD_DEFAULT, "virgl_renderer_get_last_hostptr_fd");
+        looked_up = true;
+    }
+
+    if (!get_fn) {
+        warn_report_once("virgl_renderer_get_last_hostptr_fd not available; "
+                         "hostptr present path disabled");
+        return false;
+    }
+
+    if (get_fn(ctx_id, &fd, &size) != 0 || fd < 0 || !size) {
+        return false;
+    }
+
+    if (gl->hostptr_map && (gl->hostptr_size != size || gl->hostptr_fd != fd)) {
+        munmap(gl->hostptr_map, gl->hostptr_size);
+        gl->hostptr_map = NULL;
+    }
+    if (gl->hostptr_fd >= 0 && gl->hostptr_fd != fd) {
+        close(gl->hostptr_fd);
+        gl->hostptr_fd = -1;
+    }
+
+    if (!gl->hostptr_map) {
+        void *map = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            close(fd);
+            return false;
+        }
+        gl->hostptr_map = map;
+    }
+
+    gl->hostptr_fd = fd;
+    gl->hostptr_size = size;
+    *out_ptr = gl->hostptr_map;
+    *out_size = size;
+    return true;
+}
+
+static void
+vkr_hostptr_log(const char *fmt, ...)
+{
+    FILE *f = fopen("/tmp/vkr_hostptr.log", "a");
+    if (!f) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
 }
 
 static struct virtio_gpu_virgl_resource *
@@ -537,6 +612,12 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
                                                  cc.context_init,
                                                  cc.nlen,
                                                  cc.debug_name);
+#ifdef __APPLE__
+        if (cc.context_init == VIRTIO_GPU_CAPSET_VENUS) {
+            VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+            gl->last_venus_ctx_id = cc.hdr.ctx_id;
+        }
+#endif
         return;
 #endif
     }
@@ -615,10 +696,15 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
 #ifdef CONFIG_OPENGL
     int ret;
 #endif
+#ifdef __APPLE__
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+#endif
 
     VIRTIO_GPU_FILL_CMD(ss);
     trace_virtio_gpu_cmd_set_scanout(ss.scanout_id, ss.resource_id,
                                      ss.r.width, ss.r.height, ss.r.x, ss.r.y);
+    vkr_hostptr_log("set_scanout legacy: scanout_id=%u res_id=%u w=%u h=%u",
+                    ss.scanout_id, ss.resource_id, ss.r.width, ss.r.height);
 
     if (ss.scanout_id >= g->parent_obj.conf.max_outputs) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: illegal scanout id specified %d",
@@ -628,10 +714,147 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     }
     g->parent_obj.enable = 1;
 
+#ifdef __APPLE__
+    /* Prefer host swapchain presentation for Venus on macOS (no OpenGL). */
+    if (virtio_gpu_venus_enabled(g->parent_obj.conf) &&
+        ss.resource_id && ss.r.width && ss.r.height) {
+        if (getenv("VKR_PRESENT_HOSTPTR") && gl->last_venus_ctx_id) {
+            void *present_data = NULL;
+            uint64_t present_size = 0;
+            if (virgl_try_get_last_hostptr(gl, gl->last_venus_ctx_id,
+                                           &present_data, &present_size)) {
+                struct virtio_gpu_framebuffer fb = { 0 };
+                fb.width = ss.r.width;
+                fb.height = ss.r.height;
+                fb.stride = ss.r.width * 4;
+                fb.bytes_pp = 4;
+                fb.format = PIXMAN_x8r8g8b8;
+
+                vkr_hostptr_log("legacy hostptr: ctx_id=%u size=%llu",
+                                gl->last_venus_ctx_id,
+                                (unsigned long long)present_size);
+                uint64_t need = (uint64_t)fb.stride * (uint64_t)fb.height;
+                if (present_size < need) {
+                    vkr_hostptr_log("legacy hostptr: too small (have=%llu need=%llu)",
+                                    (unsigned long long)present_size,
+                                    (unsigned long long)need);
+                    goto legacy_hostptr_fallback;
+                }
+
+                if (!gl->vk_swapchain) {
+                    void *metal_layer = cocoa_get_metal_layer();
+                    if (!metal_layer) {
+                        cocoa_set_metal_layer_enabled(true);
+                        metal_layer = cocoa_get_metal_layer();
+                    }
+                    if (metal_layer) {
+                        gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                                          fb.width,
+                                                                          fb.height);
+                        if (gl->vk_swapchain) {
+                            info_report("Venus: Host Vulkan swapchain initialized (hostptr %ux%u)",
+                                        fb.width, fb.height);
+                        }
+                    }
+                }
+
+                if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+                    if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain,
+                                                        present_data, &fb)) {
+                        g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                        return;
+                    }
+                } else {
+                    vkr_hostptr_log("legacy hostptr: swapchain invalid");
+                }
+            } else {
+                vkr_hostptr_log("legacy hostptr: no hostptr ctx_id=%u",
+                                gl->last_venus_ctx_id);
+            }
+        }
+legacy_hostptr_fallback:
+        ;
+        struct virtio_gpu_virgl_resource *res = virtio_gpu_virgl_find_resource(g, ss.resource_id);
+        if (res) {
+            struct virgl_renderer_resource_info info;
+            memset(&info, 0, sizeof(info));
+            if (virgl_renderer_resource_get_info(ss.resource_id, &info) == 0) {
+                vkr_hostptr_log("legacy swapchain: res_id=%u info=%ux%u stride=%u",
+                                ss.resource_id, info.width, info.height, info.stride);
+                if (!res->mapped_blob) {
+                    void *data = NULL;
+                    uint64_t size = 0;
+                    int map_ret = virgl_renderer_resource_map(ss.resource_id, &data, &size);
+                    if (map_ret == 0 && data) {
+                        res->mapped_blob = data;
+                        res->mapped_size = size;
+                    } else {
+                        vkr_hostptr_log("legacy swapchain: map failed res_id=%u ret=%d",
+                                        ss.resource_id, map_ret);
+                    }
+                }
+
+                if (res->mapped_blob) {
+                    struct virtio_gpu_framebuffer fb = { 0 };
+                    fb.width = info.width;
+                    fb.height = info.height;
+                    fb.stride = info.stride ? info.stride : info.width * 4;
+                    fb.bytes_pp = 4;
+                    fb.format = PIXMAN_x8r8g8b8;
+
+                    if (!gl->vk_swapchain) {
+                        void *metal_layer = cocoa_get_metal_layer();
+                        if (!metal_layer) {
+                            cocoa_set_metal_layer_enabled(true);
+                            metal_layer = cocoa_get_metal_layer();
+                        }
+                        if (metal_layer) {
+                            gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                                              fb.width,
+                                                                              fb.height);
+                            if (gl->vk_swapchain) {
+                                info_report("Venus: Host Vulkan swapchain initialized (legacy %ux%u)",
+                                            fb.width, fb.height);
+                                vkr_hostptr_log("legacy swapchain: created %ux%u",
+                                                fb.width, fb.height);
+                            } else {
+                                vkr_hostptr_log("legacy swapchain: create failed");
+                            }
+                        }
+                    }
+
+                    if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+                        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain,
+                                                            res->mapped_blob, &fb)) {
+                            g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
+                            return;
+                        } else {
+                            vkr_hostptr_log("legacy swapchain: present failed res_id=%u",
+                                            ss.resource_id);
+                        }
+                    } else {
+                        vkr_hostptr_log("legacy swapchain: swapchain invalid");
+                    }
+                }
+            } else {
+                vkr_hostptr_log("legacy swapchain: get_info failed res_id=%u", ss.resource_id);
+            }
+        }
+    }
+#endif
+
     if (ss.resource_id && ss.r.width && ss.r.height) {
+        bool do_gl = true;
+#ifdef __APPLE__
+        if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
+            /* Avoid OpenGL scanout on macOS Venus path. */
+            do_gl = false;
+        }
+#endif
 #ifdef CONFIG_OPENGL
-        struct virgl_renderer_resource_info info;
-        void *d3d_tex2d = NULL;
+        if (do_gl) {
+            struct virgl_renderer_resource_info info;
+            void *d3d_tex2d = NULL;
 
 #if VIRGL_VERSION_MAJOR >= 1
         struct virgl_renderer_resource_info_ext ext;
@@ -653,15 +876,17 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
                             ss.r.width, ss.r.height);
         virgl_renderer_force_ctx_0();
-        dpy_gl_scanout_texture(
-            g->parent_obj.scanout[ss.scanout_id].con, info.tex_id,
-            info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
-            info.width, info.height,
-            ss.r.x, ss.r.y, ss.r.width, ss.r.height,
-            d3d_tex2d);
-#else
+            dpy_gl_scanout_texture(
+                g->parent_obj.scanout[ss.scanout_id].con, info.tex_id,
+                info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+                info.width, info.height,
+                ss.r.x, ss.r.y, ss.r.width, ss.r.height,
+                d3d_tex2d);
+            return;
+        }
+#endif
         /*
-         * Venus-only mode without OpenGL: software scanout using pixman.
+         * Software scanout using pixman.
          * Use the pixman image created in RESOURCE_CREATE_2D for display.
          */
         struct virtio_gpu_virgl_resource *res;
@@ -692,7 +917,6 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                           "%s: resource %d has no pixman image\n",
                           __func__, ss.resource_id);
         }
-#endif
     } else {
         dpy_gfx_replace_surface(
             g->parent_obj.scanout[ss.scanout_id].con, NULL);
@@ -1181,6 +1405,7 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 
 #ifdef __APPLE__
     VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    vkr_hostptr_log("set_scanout_blob: res_id=%u ctx_id=%u", ss.resource_id, res->ctx_id);
     if (getenv("VKR_USE_IOSURFACE")) {
         uint32_t ios_id = 0;
         if (res->ctx_id &&
@@ -1253,7 +1478,80 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
             }
         }
     }
+    if (!gl->vk_swapchain) {
+        void *metal_layer = cocoa_get_metal_layer();
+        if (!metal_layer) {
+            cocoa_set_metal_layer_enabled(true);
+            metal_layer = cocoa_get_metal_layer();
+        }
+        if (metal_layer) {
+            gl->vk_swapchain = virtio_gpu_vk_swapchain_create(metal_layer,
+                                                              fb.width,
+                                                              fb.height);
+            if (gl->vk_swapchain) {
+                info_report("Venus: Host Vulkan swapchain initialized (lazy %ux%u)",
+                            fb.width, fb.height);
+            } else {
+                warn_report("Venus: Failed to create host Vulkan swapchain (lazy)");
+            }
+        }
+    }
+
     if (gl->vk_swapchain && virtio_gpu_vk_swapchain_is_valid(gl->vk_swapchain)) {
+        void *present_data = res->mapped_blob;
+        uint64_t present_size = res->mapped_size;
+        bool used_hostptr = false;
+
+        if (getenv("VKR_PRESENT_HOSTPTR") && res->ctx_id) {
+            /* Present from Venus' last HOST_VISIBLE allocation to avoid guest CPU copies.
+             * Alternatives:
+             *  - True dmabuf import of the GBM scanout buffer (blocked by res_id mismatch)
+             *  - IOSurface path (host-side copy from blob)
+             *  - Guest CPU memcpy into GBM (fallback path)
+             */
+            if (virgl_try_get_last_hostptr(gl, res->ctx_id, &present_data, &present_size)) {
+                uint64_t need = (uint64_t)fb.stride * (uint64_t)fb.height;
+                if (present_size < need) {
+                    fprintf(stderr,
+                            "QEMU hostptr present: too small (have=%llu need=%llu), fallback to blob\n",
+                            (unsigned long long)present_size,
+                            (unsigned long long)need);
+                    vkr_hostptr_log("hostptr too small: have=%llu need=%llu res_id=%u ctx_id=%u",
+                                    (unsigned long long)present_size,
+                                    (unsigned long long)need,
+                                    ss.resource_id,
+                                    res->ctx_id);
+                    present_data = res->mapped_blob;
+                    present_size = res->mapped_size;
+                } else {
+                    fprintf(stderr,
+                            "QEMU hostptr present: using hostptr %p size=%llu for res_id=%u ctx_id=%u\n",
+                            present_data,
+                            (unsigned long long)present_size,
+                            ss.resource_id,
+                            res->ctx_id);
+                    vkr_hostptr_log("hostptr ok: ptr=%p size=%llu res_id=%u ctx_id=%u",
+                                    present_data,
+                                    (unsigned long long)present_size,
+                                    ss.resource_id,
+                                    res->ctx_id);
+                    cocoa_set_metal_layer_enabled(true);
+                    used_hostptr = true;
+                }
+            } else {
+                fprintf(stderr,
+                        "QEMU hostptr present: no hostptr for res_id=%u ctx_id=%u, fallback to blob\n",
+                        ss.resource_id,
+                        res->ctx_id);
+                vkr_hostptr_log("hostptr missing: res_id=%u ctx_id=%u", ss.resource_id, res->ctx_id);
+            }
+        }
+
+        fprintf(stderr, "QEMU swapchain present: res_id=%u ctx_id=%u used_hostptr=%d stride=%u height=%u\n",
+                ss.resource_id, res->ctx_id, used_hostptr ? 1 : 0, fb.stride, fb.height);
+        vkr_hostptr_log("swapchain present: res_id=%u ctx_id=%u used_hostptr=%d stride=%u height=%u",
+                        ss.resource_id, res->ctx_id, used_hostptr ? 1 : 0, fb.stride, fb.height);
+
         /* Resize swapchain if dimensions changed */
         uint32_t sw_width, sw_height;
         virtio_gpu_vk_swapchain_get_size(gl->vk_swapchain, &sw_width, &sw_height);
@@ -1262,7 +1560,7 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         }
 
         /* Present the blob via Vulkan swapchain */
-        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, res->mapped_blob, &fb)) {
+        if (virtio_gpu_vk_swapchain_present(gl->vk_swapchain, present_data, &fb)) {
             /* Update scanout state for tracking */
             g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
             return;

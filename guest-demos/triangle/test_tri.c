@@ -1,9 +1,17 @@
-/* Zero-copy Vulkan triangle demo
+/* Zero-copy-ish Vulkan triangle demo (host-present path)
  *
  * Architecture:
- *   GBM blob (SCANOUT) ←─ import fd ─→ VkImage ←─ render
+ *   VkImage (LINEAR, HOST_VISIBLE) ── render on host GPU
  *        │
- *        └─→ DRM scanout (same memory, no copy!)
+ *        ├─→ QEMU presents hostptr via Vulkan swapchain (no guest CPU copy)
+ *        └─→ GBM blob (SCANOUT) only used to trigger SET_SCANOUT_BLOB
+ *
+ * Why: We want the host to present directly from Venus' host-visible allocation,
+ *      avoiding the guest-side memcpy into GBM.
+ * Alternatives:
+ *   1) True dmabuf import of the GBM buffer (blocked by resource ID mismatch).
+ *   2) IOSurface path (host-side copy from blob).
+ *   3) Guest CPU copy to GBM (current fallback path).
  */
 #define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
@@ -221,10 +229,10 @@ int main(void) {
     }
     printf("Using memory type: %u (HOST_VISIBLE)\n", mem_type); fflush(stdout);
 
-    // Close the GBM prime_fd - we're not using zero-copy (resource sharing issue)
+    // Close the GBM prime_fd - we only need the GBM BO for scanout metadata.
     close(prime_fd);
 
-    // Allocate HOST_VISIBLE memory for rendering, then we'll copy to GBM
+    // Allocate HOST_VISIBLE memory for rendering. Host will present this via swapchain.
     VkMemoryAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = mem_req.size,
@@ -241,14 +249,7 @@ int main(void) {
     printf("vkBindImageMemory returned %d\n", res_bind); fflush(stdout);
     if (res_bind != VK_SUCCESS) { printf("VK err %d @ bind\n", res_bind); return 1; }
 
-    // Map the render memory for copying to GBM after rendering
-    printf("Mapping render memory...\n"); fflush(stdout);
-    void *render_ptr = NULL;
-    VkResult res_map = vkMapMemory(device, render_mem, 0, mem_req.size, 0, &render_ptr);
-    printf("vkMapMemory returned %d\n", res_map); fflush(stdout);
-    if (res_map != VK_SUCCESS) { printf("VK err %d @ map\n", res_map); return 1; }
-
-    printf("Done with memory setup (HOST_VISIBLE + copy mode)\n"); fflush(stdout);
+    printf("Done with memory setup (HOST_VISIBLE, no guest copy)\n"); fflush(stdout);
 
     // Create image view
     printf("Creating image view...\n"); fflush(stdout);
@@ -452,32 +453,14 @@ int main(void) {
 
     printf("Rendered triangle\n"); fflush(stdout);
 
-    // Copy from Vulkan render buffer to GBM scanout buffer
-    printf("Copying rendered content to GBM buffer...\n"); fflush(stdout);
-    void *gbm_map_data = NULL;
-    uint32_t gbm_stride;
-    void *gbm_ptr = gbm_bo_map(bo, 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbm_stride, &gbm_map_data);
-    if (gbm_ptr) {
-        // Get Vulkan image layout
-        VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
-        VkSubresourceLayout layout;
-        vkGetImageSubresourceLayout(device, render_img, &subres, &layout);
-
-        printf("Copying: VK pitch=%llu, GBM stride=%u\n",
-               (unsigned long long)layout.rowPitch, gbm_stride);
-
-        // Copy row by row (may have different pitches)
-        for (uint32_t y = 0; y < H; y++) {
-            memcpy((char*)gbm_ptr + y * gbm_stride,
-                   (char*)render_ptr + layout.offset + y * layout.rowPitch,
-                   W * 4);
-        }
-        gbm_bo_unmap(bo, gbm_map_data);
-        printf("Copied to GBM buffer successfully!\n");
-    } else {
-        printf("ERROR: Failed to map GBM buffer for copy!\n");
+    // No guest-side copy: QEMU will present the host-visible allocation directly.
+    VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(device, render_img, &subres, &layout);
+    if (layout.rowPitch != stride) {
+        printf("WARNING: VkImage rowPitch (%llu) != GBM stride (%u)\n",
+               (unsigned long long)layout.rowPitch, stride);
     }
-    fflush(stdout);
 
     // Scanout the GBM buffer - use various methods to display
     printf("Setting DRM scanout...\n");

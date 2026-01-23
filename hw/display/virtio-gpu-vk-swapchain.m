@@ -504,6 +504,18 @@ bool virtio_gpu_vk_swapchain_present(VirtIOGPUVkSwapchain *s,
         return false;
     }
 
+    if (getenv("VKR_PRESENT_DEBUG")) {
+        uint32_t *p = (uint32_t *)((uint8_t *)blob_data + fb->offset);
+        fprintf(stderr, "swapchain debug: fmt=%u stride=%u w=%u h=%u first_pixel=0x%08x\n",
+                fb->format, fb->stride, fb->width, fb->height, p ? *p : 0);
+        FILE *f = fopen("/tmp/vkr_hostptr.log", "a");
+        if (f) {
+            fprintf(f, "swapchain debug: fmt=%u stride=%u w=%u h=%u first_pixel=0x%08x\n",
+                    fb->format, fb->stride, fb->width, fb->height, p ? *p : 0);
+            fclose(f);
+        }
+    }
+
     /* Wait for previous frame */
     vkWaitForFences(s->device, 1, &s->in_flight, VK_TRUE, UINT64_MAX);
 
