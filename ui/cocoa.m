@@ -1397,6 +1397,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         qkbd_state_key_event(kbd, Q_KEY_CODE_CTRL, false);
         qkbd_state_key_event(kbd, Q_KEY_CODE_ALT, false);
         qkbd_state_key_event(kbd, Q_KEY_CODE_META_L, false);
+        qemu_input_event_sync();
 
         for (NSUInteger i = 0; i < [text length]; i++) {
             unichar c = [text characterAtIndex:i];
@@ -1415,15 +1416,19 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
             /* Press shift if needed */
             if (mapping.shift) {
                 qkbd_state_key_event(kbd, Q_KEY_CODE_SHIFT, true);
+                qemu_input_event_sync();
             }
 
             /* Press and release the key */
             qkbd_state_key_event(kbd, mapping.qcode, true);
+            qemu_input_event_sync();
             qkbd_state_key_event(kbd, mapping.qcode, false);
+            qemu_input_event_sync();
 
             /* Release shift if it was pressed */
             if (mapping.shift) {
                 qkbd_state_key_event(kbd, Q_KEY_CODE_SHIFT, false);
+                qemu_input_event_sync();
             }
         }
     });

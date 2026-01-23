@@ -1,11 +1,11 @@
-/* Animated Vulkan cube demo - host swapchain present path
+/* Animated Vulkan cube demo - HOST_VISIBLE + copy path
  *
  * Architecture:
- *   VkImage (LINEAR, HOST_VISIBLE) ← render on host GPU
+ *   VkImage (LINEAR, HOST_VISIBLE) ← render on host
  *        ↓
- *   QEMU presents hostptr via Vulkan swapchain (no guest CPU copy)
+ *   memcpy to GBM buffer (XRGB8888)
  *        ↓
- *   DRM scanout used only to trigger scanout updates
+ *   DRM scanout (drmModeDirtyFB + drmModeSetCrtc)
  */
 #define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
@@ -15,7 +15,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <stdint.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <gbm.h>
@@ -77,96 +76,10 @@ static uint32_t find_mem(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, VkM
 }
 #define VK_CHECK(x) do{VkResult r=(x);if(r){printf("VK err %d @ %d\n",r,__LINE__);exit(1);}}while(0)
 
-static uint32_t get_prop_id(int fd, uint32_t obj_id, uint32_t obj_type, const char *name) {
-    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, obj_id, obj_type);
-    if (!props) {
-        return 0;
-    }
-    uint32_t prop_id = 0;
-    for (uint32_t i = 0; i < props->count_props; i++) {
-        drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
-        if (prop && strcmp(prop->name, name) == 0) {
-            prop_id = prop->prop_id;
-            drmModeFreeProperty(prop);
-            break;
-        }
-        drmModeFreeProperty(prop);
-    }
-    drmModeFreeObjectProperties(props);
-    return prop_id;
-}
-
-static uint32_t find_primary_plane(int fd, drmModeRes *res, uint32_t crtc_id) {
-    drmModePlaneRes *plane_res = drmModeGetPlaneResources(fd);
-    if (!plane_res) {
-        return 0;
-    }
-
-    int crtc_index = -1;
-    for (int i = 0; i < res->count_crtcs; i++) {
-        if (res->crtcs[i] == crtc_id) {
-            crtc_index = i;
-            break;
-        }
-    }
-    if (crtc_index < 0) {
-        drmModeFreePlaneResources(plane_res);
-        return 0;
-    }
-    uint32_t crtc_bit = 1u << crtc_index;
-
-    uint32_t best_plane = 0;
-    for (uint32_t i = 0; i < plane_res->count_planes; i++) {
-        uint32_t plane_id = plane_res->planes[i];
-        drmModePlane *plane = drmModeGetPlane(fd, plane_id);
-        if (!plane) {
-            continue;
-        }
-        if (!(plane->possible_crtcs & crtc_bit)) {
-            drmModeFreePlane(plane);
-            continue;
-        }
-
-        uint32_t type_prop = get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type");
-        if (type_prop) {
-            drmModeObjectProperties *props = drmModeObjectGetProperties(fd, plane_id,
-                                                                        DRM_MODE_OBJECT_PLANE);
-            if (props) {
-                for (uint32_t p = 0; p < props->count_props; p++) {
-                    if (props->props[p] == type_prop) {
-                        if (props->prop_values[p] == 1) {
-                            best_plane = plane_id;
-                        }
-                        break;
-                    }
-                }
-                drmModeFreeObjectProperties(props);
-            }
-        }
-
-        if (!best_plane) {
-            best_plane = plane_id;
-        }
-        drmModeFreePlane(plane);
-        if (best_plane) {
-            break;
-        }
-    }
-
-    drmModeFreePlaneResources(plane_res);
-    return best_plane;
-}
-
 int main(void) {
     // === DRM/GBM Setup ===
     int drm_fd = open("/dev/dri/card0", O_RDWR);
     drmSetMaster(drm_fd);
-    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0) {
-        printf("Enabled DRM universal planes\n");
-    }
-    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0) {
-        printf("Enabled DRM atomic\n");
-    }
     drmModeRes *res = drmModeGetResources(drm_fd);
     drmModeConnector *conn = NULL;
     for(int i=0; i<res->count_connectors; i++) {
@@ -180,33 +93,17 @@ int main(void) {
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
 
-    drmModeCrtc *orig_crtc = drmModeGetCrtc(drm_fd, crtc_id);
-
     // Create GBM scanout buffer (XRGB8888 - no alpha!)
     struct gbm_device *gbm = gbm_create_device(drm_fd);
     struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
                                        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     uint32_t stride = gbm_bo_get_stride(bo);
 
-    uint32_t fb_id = 0;
+    uint32_t fb_id;
     uint32_t handles[4] = { gbm_bo_get_handle(bo).u32 };
     uint32_t strides[4] = { stride };
     uint32_t offsets[4] = { 0 };
-    uint64_t modifiers[4] = { gbm_bo_get_modifier(bo), 0, 0, 0 };
-    if (drmModeAddFB2WithModifiers(drm_fd, W, H, GBM_FORMAT_XRGB8888,
-                                   handles, strides, offsets, modifiers,
-                                   &fb_id, DRM_MODE_FB_MODIFIERS) == 0) {
-        printf("Created FB with modifiers (mod=0x%llx)\n",
-               (unsigned long long)modifiers[0]);
-    } else {
-        if (drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888,
-                          handles, strides, offsets, &fb_id, 0) == 0) {
-            printf("Created FB without modifiers\n");
-        } else {
-            printf("Failed to create DRM framebuffer\n");
-            return 1;
-        }
-    }
+    drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id, 0);
 
     // === Vulkan Setup (No External Memory!) ===
     VkInstance instance;
@@ -252,16 +149,9 @@ int main(void) {
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
     }, NULL, &rtMem));
     VK_CHECK(vkBindImageMemory(device, rtImg, rtMem, 0));
-    void *rtPtr = NULL;
-    VK_CHECK(vkMapMemory(device, rtMem, 0, VK_WHOLE_SIZE, 0, &rtPtr));
 
-    VkSubresourceLayout layout;
-    vkGetImageSubresourceLayout(device, rtImg,
-                                &(VkImageSubresource){VK_IMAGE_ASPECT_COLOR_BIT,0,0},
-                                &layout);
-    printf("Render image rowPitch=%llu size=%llu\n",
-           (unsigned long long)layout.rowPitch,
-           (unsigned long long)rtReq.size);
+    // Map render memory for copying later
+    void *rtPtr; VK_CHECK(vkMapMemory(device, rtMem, 0, VK_WHOLE_SIZE, 0, &rtPtr));
 
     VkImageView rtView;
     VK_CHECK(vkCreateImageView(device, &(VkImageViewCreateInfo){
@@ -452,73 +342,16 @@ int main(void) {
     VkFence fence;
     VK_CHECK(vkCreateFence(device, &(VkFenceCreateInfo){.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL, &fence));
 
+    // Get VkImage layout for copying
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(device, rtImg, &(VkImageSubresource){VK_IMAGE_ASPECT_COLOR_BIT,0,0}, &layout);
+
     // Matrices
     mat4 proj, view;
     mat4_perspective(proj, 3.14159f/4.0f, (float)W/(float)H, 0.1f, 100.0f);
     mat4_lookat(view, 0, 2, 5, 0, 0, 0, 0, 1, 0);
 
-    uint32_t plane_id = find_primary_plane(drm_fd, res, crtc_id);
-    uint32_t mode_blob_id = 0;
-    bool atomic_ready = false;
-    uint32_t conn_crtc = 0, crtc_mode = 0, crtc_active = 0;
-    uint32_t plane_fb = 0, plane_crtc = 0, plane_src_x = 0, plane_src_y = 0;
-    uint32_t plane_src_w = 0, plane_src_h = 0, plane_crtc_x = 0, plane_crtc_y = 0;
-    uint32_t plane_crtc_w = 0, plane_crtc_h = 0;
-
-    if (plane_id) {
-        conn_crtc = get_prop_id(drm_fd, conn->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
-        crtc_mode = get_prop_id(drm_fd, crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID");
-        crtc_active = get_prop_id(drm_fd, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE");
-        plane_fb = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID");
-        plane_crtc = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
-        plane_src_x = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X");
-        plane_src_y = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y");
-        plane_src_w = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W");
-        plane_src_h = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H");
-        plane_crtc_x = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X");
-        plane_crtc_y = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
-        plane_crtc_w = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W");
-        plane_crtc_h = get_prop_id(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H");
-
-        if (conn_crtc && crtc_mode && crtc_active && plane_fb && plane_crtc &&
-            plane_src_x && plane_src_y && plane_src_w && plane_src_h &&
-            plane_crtc_x && plane_crtc_y && plane_crtc_w && plane_crtc_h) {
-            if (drmModeCreatePropertyBlob(drm_fd, mode, sizeof(*mode), &mode_blob_id) == 0) {
-                atomic_ready = true;
-            }
-        }
-    }
-
-    /* One-time modeset/scanout; host-present handles per-frame updates. */
-    if (atomic_ready) {
-        drmModeAtomicReq *req = drmModeAtomicAlloc();
-        if (req) {
-            drmModeAtomicAddProperty(req, conn->connector_id, conn_crtc, crtc_id);
-            drmModeAtomicAddProperty(req, crtc_id, crtc_mode, mode_blob_id);
-            drmModeAtomicAddProperty(req, crtc_id, crtc_active, 1);
-            drmModeAtomicAddProperty(req, plane_id, plane_fb, fb_id);
-            drmModeAtomicAddProperty(req, plane_id, plane_crtc, crtc_id);
-            drmModeAtomicAddProperty(req, plane_id, plane_crtc_x, 0);
-            drmModeAtomicAddProperty(req, plane_id, plane_crtc_y, 0);
-            drmModeAtomicAddProperty(req, plane_id, plane_crtc_w, W);
-            drmModeAtomicAddProperty(req, plane_id, plane_crtc_h, H);
-            drmModeAtomicAddProperty(req, plane_id, plane_src_x, 0);
-            drmModeAtomicAddProperty(req, plane_id, plane_src_y, 0);
-            drmModeAtomicAddProperty(req, plane_id, plane_src_w, W << 16);
-            drmModeAtomicAddProperty(req, plane_id, plane_src_h, H << 16);
-
-            if (drmModeAtomicCommit(drm_fd, req,
-                                    DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) != 0) {
-                atomic_ready = false;
-            }
-            drmModeAtomicFree(req);
-        }
-    }
-    if (!atomic_ready) {
-        drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
-    }
-
-    printf("Spinning for 10s (HOST_VISIBLE, no guest copy)...\n");
+    printf("Spinning for 10s (HOST_VISIBLE + copy)...\n");
     struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
     int frames = 0;
 
@@ -561,32 +394,30 @@ int main(void) {
         VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
         vkResetFences(device, 1, &fence);
 
-        /* Ensure GPU writes are visible to host-visible memory before host reads. */
-        VkMappedMemoryRange range = {
-            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-            .memory = rtMem,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        };
-        vkInvalidateMappedMemoryRanges(device, 1, &range);
+        // Copy VkImage to GBM buffer (like test_tri)
+        void *gbmPtr = NULL; uint32_t gbmStride;
+        void *mapData = NULL;
+        gbmPtr = gbm_bo_map(bo, 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbmStride, &mapData);
+        if (gbmPtr) {
+            for (uint32_t y = 0; y < H; y++) {
+                memcpy((char*)gbmPtr + y * gbmStride,
+                       (char*)rtPtr + layout.offset + y * layout.rowPitch,
+                       W * 4);
+            }
+            gbm_bo_unmap(bo, mapData);
+        }
 
+        // Display via DRM
+        drmModeDirtyFB(drm_fd, fb_id, &(drmModeClip){0, 0, W, H}, 1);
+        drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
         frames++;
     }
 
-    printf("Done! %d frames (%.1f fps) - HOST_VISIBLE, no guest copy\n", frames, frames/10.0f);
+    printf("Done! %d frames (%.1f fps) - HOST_VISIBLE + copy\n", frames, frames/10.0f);
 
+    vkUnmapMemory(device, rtMem);
     vkUnmapMemory(device, uboMem);
     vkDeviceWaitIdle(device);
-
-    if (orig_crtc && orig_crtc->buffer_id) {
-        drmModeSetCrtc(drm_fd, orig_crtc->crtc_id, orig_crtc->buffer_id,
-                       orig_crtc->x, orig_crtc->y, &conn->connector_id, 1,
-                       &orig_crtc->mode);
-    }
-    drmDropMaster(drm_fd);
-    if (mode_blob_id) {
-        drmModeDestroyPropertyBlob(drm_fd, mode_blob_id);
-    }
 
     // Cleanup
     vkDestroyFence(device, fence, NULL);
@@ -612,9 +443,6 @@ int main(void) {
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
 
-    if (orig_crtc) {
-        drmModeFreeCrtc(orig_crtc);
-    }
     drmModeRmFB(drm_fd, fb_id);
     gbm_bo_destroy(bo);
     gbm_device_destroy(gbm);
