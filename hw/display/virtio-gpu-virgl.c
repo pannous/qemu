@@ -62,6 +62,10 @@ typedef int (*virgl_renderer_resource_get_iosurface_id_fn)(uint32_t ctx_id,
 typedef int (*virgl_renderer_get_last_hostptr_fd_fn)(uint32_t ctx_id,
                                                      int *out_fd,
                                                      uint64_t *out_size);
+typedef int (*virgl_renderer_get_hostptr_fd_for_size_fn)(uint32_t ctx_id,
+                                                         uint64_t min_size,
+                                                         int *out_fd,
+                                                         uint64_t *out_size);
 
 static bool
 virgl_try_register_venus_resource(uint32_t ctx_id, uint32_t res_id)
@@ -110,12 +114,13 @@ virgl_try_get_resource_iosurface_id(uint32_t ctx_id, uint32_t res_id, uint32_t *
 }
 
 static bool
-virgl_try_get_last_hostptr(VirtIOGPUGL *gl,
-                           uint32_t ctx_id,
-                           void **out_ptr,
-                           uint64_t *out_size)
+virgl_try_get_hostptr_for_size(VirtIOGPUGL *gl,
+                               uint32_t ctx_id,
+                               uint64_t min_size,
+                               void **out_ptr,
+                               uint64_t *out_size)
 {
-    static virgl_renderer_get_last_hostptr_fd_fn get_fn;
+    static virgl_renderer_get_hostptr_fd_for_size_fn get_fn;
     static bool looked_up;
     int fd = -1;
     uint64_t size = 0;
@@ -125,18 +130,18 @@ virgl_try_get_last_hostptr(VirtIOGPUGL *gl,
     }
 
     if (!looked_up) {
-        get_fn = (virgl_renderer_get_last_hostptr_fd_fn)dlsym(
-            RTLD_DEFAULT, "virgl_renderer_get_last_hostptr_fd");
+        get_fn = (virgl_renderer_get_hostptr_fd_for_size_fn)dlsym(
+            RTLD_DEFAULT, "virgl_renderer_get_hostptr_fd_for_size");
         looked_up = true;
     }
 
     if (!get_fn) {
-        warn_report_once("virgl_renderer_get_last_hostptr_fd not available; "
+        warn_report_once("virgl_renderer_get_hostptr_fd_for_size not available; "
                          "hostptr present path disabled");
         return false;
     }
 
-    if (get_fn(ctx_id, &fd, &size) != 0 || fd < 0 || !size) {
+    if (get_fn(ctx_id, min_size, &fd, &size) != 0 || fd < 0 || !size) {
         return false;
     }
 
@@ -721,8 +726,9 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         if (getenv("VKR_PRESENT_HOSTPTR") && gl->last_venus_ctx_id) {
             void *present_data = NULL;
             uint64_t present_size = 0;
-            if (virgl_try_get_last_hostptr(gl, gl->last_venus_ctx_id,
-                                           &present_data, &present_size)) {
+            uint64_t need = (uint64_t)ss.r.width * (uint64_t)ss.r.height * 4;
+            if (virgl_try_get_hostptr_for_size(gl, gl->last_venus_ctx_id,
+                                               need, &present_data, &present_size)) {
                 struct virtio_gpu_framebuffer fb = { 0 };
                 fb.width = ss.r.width;
                 fb.height = ss.r.height;
@@ -1509,8 +1515,9 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
              *  - IOSurface path (host-side copy from blob)
              *  - Guest CPU memcpy into GBM (fallback path)
              */
-            if (virgl_try_get_last_hostptr(gl, res->ctx_id, &present_data, &present_size)) {
-                uint64_t need = (uint64_t)fb.stride * (uint64_t)fb.height;
+            uint64_t need = (uint64_t)fb.stride * (uint64_t)fb.height;
+            if (virgl_try_get_hostptr_for_size(gl, res->ctx_id,
+                                               need, &present_data, &present_size)) {
                 if (present_size < need) {
                     fprintf(stderr,
                             "QEMU hostptr present: too small (have=%llu need=%llu), fallback to blob\n",
