@@ -98,9 +98,13 @@ static VkFence inFlight[MAX_FRAMES];
 static uint32_t curFrame = 0;
 static void *uboMap;
 
-// FPS tracking
+// FPS and frame time tracking
 static int frameCount = 0;
 static double lastFPSTime = 0;
+static double lastFrameTime = 0;
+static double frameTimeSum = 0;
+static double minFrameTime = 999999;
+static double maxFrameTime = 0;
 
 static double getTime() {
     struct timespec ts;
@@ -419,18 +423,37 @@ void initVulkan(CAMetalLayer *metalLayer) {
     }
 
     lastFPSTime = getTime();
+    lastFrameTime = lastFPSTime;
     printf("Native MoltenVK initialized successfully!\n");
     fflush(stdout);
 }
 
 void renderFrame() {
-    // FPS tracking
-    frameCount++;
+    // FPS and frame time tracking
     double now = getTime();
+    double frameTime = (lastFrameTime > 0) ? (now - lastFrameTime) : 0;
+    lastFrameTime = now;
+
+    if (frameTime > 0) {
+        frameTimeSum += frameTime;
+        if (frameTime < minFrameTime) minFrameTime = frameTime;
+        if (frameTime > maxFrameTime) maxFrameTime = frameTime;
+    }
+
+    frameCount++;
     if(now - lastFPSTime >= 1.0) {
-        printf("FPS: %d\n", frameCount);
+        double avgFrameTime = frameTimeSum / frameCount;
+        double avgFrameTimeMs = avgFrameTime * 1000.0;
+        double theoreticalMaxFPS = 1000.0 / avgFrameTimeMs;
+
+        printf("FPS: %d (avg: %.1f) | Frame time: %.2fms (%.0f max FPS)\n",
+               frameCount, 1.0 / avgFrameTime, avgFrameTimeMs, theoreticalMaxFPS);
         fflush(stdout);
+
         frameCount = 0;
+        frameTimeSum = 0;
+        minFrameTime = 999999;
+        maxFrameTime = 0;
         lastFPSTime = now;
     }
 

@@ -260,17 +260,34 @@
             return out;
         }
 
-        // FPS counter
+        // FPS and frame time tracking
         let frameCount = 0;
         let lastTime = performance.now();
+        let lastFrameTime = performance.now();
+        let frameTimeSum = 0;
         const fpsElement = document.getElementById('fps');
 
         function updateFPS() {
-            frameCount++;
             const now = performance.now();
+            const frameTime = now - lastFrameTime;
+            lastFrameTime = now;
+
+            if (frameTime > 0) {
+                frameTimeSum += frameTime;
+            }
+
+            frameCount++;
             if (now - lastTime >= 1000) {
-                fpsElement.textContent = `FPS: ${frameCount}`;
+                const avgFrameTime = frameTimeSum / frameCount;
+                const theoreticalMaxFPS = 1000.0 / avgFrameTime;
+                const avgFPS = frameCount / ((now - lastTime) / 1000);
+
+                fpsElement.textContent =
+                    `FPS: ${frameCount.toFixed(1)} (avg: ${avgFPS.toFixed(1)}) | ` +
+                    `Frame time: ${avgFrameTime.toFixed(2)}ms (${theoreticalMaxFPS.toFixed(0)} max FPS)`;
+
                 frameCount = 0;
+                frameTimeSum = 0;
                 lastTime = now;
             }
         }
