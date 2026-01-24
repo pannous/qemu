@@ -177,7 +177,7 @@ void initVulkan(CAMetalLayer *metalLayer) {
     swInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swInfo.preTransform = caps.currentTransform;
     swInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    swInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;  // Uncapped FPS, no VSync
     VK_CHECK(vkCreateSwapchainKHR(device, &swInfo, NULL, &swapchain));
 
     swapCount = 8;
@@ -521,11 +521,12 @@ void renderFrame() {
     [self.view setWantsLayer:YES];
     [self.window setContentView:self.view];
     [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 
     CAMetalLayer *metalLayer = (CAMetalLayer *)self.view.layer;
     initVulkan(metalLayer);
 
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
+    self.timer = [NSTimer scheduledTimerWithTimeInterval:0.001  // ~1000 FPS max, uncapped
                                                   target:self
                                                 selector:@selector(renderFrame:)
                                                 userInfo:nil
