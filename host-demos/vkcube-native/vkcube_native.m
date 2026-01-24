@@ -416,6 +416,7 @@ void renderFrame() {
     double now = getTime();
     if(now - lastFPSTime >= 1.0) {
         printf("FPS: %d\n", frameCount);
+        fflush(stdout);
         frameCount = 0;
         lastFPSTime = now;
     }
