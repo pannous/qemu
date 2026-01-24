@@ -20,3 +20,7 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+
+# Host demo binaries
+host-demos/*/metal-cube
+host-demos/*/vkcube_native
