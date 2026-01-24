@@ -210,13 +210,15 @@
         gl.enable(gl.CULL_FACE);
         gl.cullFace(gl.BACK);
 
-        // FPS counter
+        // FPS counter and frame timing
         let frameCount = 0;
         let totalFrames = 0;
         let lastTime = performance.now();
         let startTime = lastTime;
         let rotation = 0;
         let firstFrame = true;
+        let frameTimesSum = 0;
+        let lastFrameTime = performance.now();
 
         function render() {
             if (firstFrame) {
@@ -225,16 +227,22 @@
             }
 
             const now = performance.now();
+            const frameTime = now - lastFrameTime;
+            lastFrameTime = now;
+
             frameCount++;
             totalFrames++;
+            frameTimesSum += frameTime;
 
             // Update FPS every second
             if (now - lastTime >= 1000) {
                 const instantFPS = frameCount / ((now - lastTime) / 1000);
                 const avgFPS = totalFrames / ((now - startTime) / 1000);
+                const avgFrameTime = frameTimesSum / frameCount;
                 document.getElementById('fps').textContent =
-                    `FPS: ${instantFPS.toFixed(1)} (avg: ${avgFPS.toFixed(1)} over ${totalFrames} frames)`;
+                    `FPS: ${instantFPS.toFixed(1)} (avg: ${avgFPS.toFixed(1)}) | Frame time: ${avgFrameTime.toFixed(2)}ms (${(1000/avgFrameTime).toFixed(1)} max FPS)`;
                 frameCount = 0;
+                frameTimesSum = 0;
                 lastTime = now;
             }
 
