@@ -40,6 +40,7 @@ static const uint16_t cubeIndices[] = {
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipelineState;
+@property (nonatomic, strong) id<MTLDepthStencilState> depthStencilState;
 @property (nonatomic, strong) id<MTLBuffer> vertexBuffer;
 @property (nonatomic, strong) id<MTLBuffer> indexBuffer;
 @property (nonatomic, strong) id<MTLBuffer> uniformBuffer;
@@ -64,6 +65,7 @@ static const uint16_t cubeIndices[] = {
 
 - (void)setupMetal {
     self.commandQueue = [self.device newCommandQueue];
+    NSLog(@"Setting up Metal...");
 
     NSError *error = nil;
     NSString *shaderSource = @
@@ -103,7 +105,16 @@ static const uint16_t cubeIndices[] = {
     }
 
     id<MTLFunction> vertexFunc = [library newFunctionWithName:@"vertex_main"];
+    if (!vertexFunc) {
+        NSLog(@"Failed to load vertex function");
+        exit(1);
+    }
+
     id<MTLFunction> fragmentFunc = [library newFunctionWithName:@"fragment_main"];
+    if (!fragmentFunc) {
+        NSLog(@"Failed to load fragment function");
+        exit(1);
+    }
 
     MTLRenderPipelineDescriptor *pipelineDesc = [[MTLRenderPipelineDescriptor alloc] init];
     pipelineDesc.vertexFunction = vertexFunc;
@@ -139,6 +150,11 @@ static const uint16_t cubeIndices[] = {
 
     self.uniformBuffer = [self.device newBufferWithLength:sizeof(Uniforms)
                                                   options:MTLResourceStorageModeShared];
+
+    MTLDepthStencilDescriptor *depthDesc = [[MTLDepthStencilDescriptor alloc] init];
+    depthDesc.depthCompareFunction = MTLCompareFunctionLess;
+    depthDesc.depthWriteEnabled = YES;
+    self.depthStencilState = [self.device newDepthStencilStateWithDescriptor:depthDesc];
 }
 
 - (simd_float4x4)perspectiveWithFovy:(float)fovy aspect:(float)aspect near:(float)near far:(float)far {
@@ -160,24 +176,36 @@ static const uint16_t cubeIndices[] = {
 }
 
 - (void)drawInMTKView:(MTKView *)view {
+    static BOOL firstFrame = YES;
+    if (firstFrame) {
+        NSLog(@"First frame rendering...");
+        firstFrame = NO;
+    }
+
     self.frameCount++;
     CFTimeInterval currentTime = CACurrentMediaTime();
 
     if (currentTime - self.lastFrameTime >= 1.0) {
         float fps = self.frameCount / (currentTime - self.lastFrameTime);
-        printf("\rFPS: %.1f", fps);
-        fflush(stdout);
+        fprintf(stderr, "FPS: %.1f\n", fps);
+        fflush(stderr);
         self.frameCount = 0;
         self.lastFrameTime = currentTime;
     }
 
     self.rotation += 0.01f;
 
+    // Rotation around Y axis, then around X axis
+    float rotY = cosf(self.rotation);
+    float rotYsin = sinf(self.rotation);
+    float rotX = cosf(self.rotation * 0.7f);
+    float rotXsin = sinf(self.rotation * 0.7f);
+
     simd_float4x4 modelMatrix = simd_matrix(
-        (simd_float4){cosf(self.rotation), sinf(self.rotation) * 0.5f, 0, 0},
-        (simd_float4){-sinf(self.rotation) * 0.5f, cosf(self.rotation), 0, 0},
-        (simd_float4){0, 0, 1, 0},
-        (simd_float4){0, 0, -8, 1}
+        (simd_float4){rotY, 0, rotYsin, 0},
+        (simd_float4){rotYsin * rotXsin, rotX, -rotY * rotXsin, 0},
+        (simd_float4){-rotYsin * rotX, rotXsin, rotY * rotX, 0},
+        (simd_float4){0, 0, -5, 1}  // Closer to camera
     );
 
     simd_float4x4 viewMatrix = simd_matrix(
@@ -197,11 +225,12 @@ static const uint16_t cubeIndices[] = {
 
     MTLRenderPassDescriptor *renderPass = view.currentRenderPassDescriptor;
     if (renderPass) {
-        renderPass.colorAttachments[0].clearColor = MTLClearColorMake(0.1, 0.1, 0.15, 1.0);
+        renderPass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);  // Black background
         renderPass.colorAttachments[0].loadAction = MTLLoadActionClear;
 
         id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPass];
         [encoder setRenderPipelineState:self.pipelineState];
+        [encoder setDepthStencilState:self.depthStencilState];
         [encoder setVertexBuffer:self.vertexBuffer offset:0 atIndex:0];
         [encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
         [encoder setCullMode:MTLCullModeBack];
@@ -252,20 +281,27 @@ static const uint16_t cubeIndices[] = {
     self.mtkView.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
     self.mtkView.clearColor = MTLClearColorMake(0.1, 0.1, 0.15, 1.0);
 
-    // Disable VSync and enable continuous rendering for max FPS
-    self.mtkView.enableSetNeedsDisplay = NO;
-    self.mtkView.preferredFramesPerSecond = 0;  // Unlimited FPS
-    self.mtkView.paused = NO;
-
     self.renderer = [[MetalRenderer alloc] initWithDevice:device];
     self.mtkView.delegate = self.renderer;
+
+    // Enable continuous rendering for max FPS
+    self.mtkView.enableSetNeedsDisplay = NO;
+    self.mtkView.paused = NO;
+
+    // Disable VSync by requesting very high refresh rate
+    if (@available(macOS 10.15, *)) {
+        CAMetalLayer *metalLayer = (CAMetalLayer *)self.mtkView.layer;
+        metalLayer.displaySyncEnabled = NO;  // Disable VSync!
+    }
+    self.mtkView.preferredFramesPerSecond = 240;
 
     [self.window setContentView:self.mtkView];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    printf("Metal Gradient Cube - Host Performance Baseline\n");
-    printf("Press Cmd+Q to quit\n\n");
+    NSLog(@"Metal Gradient Cube - Host Performance Baseline");
+    NSLog(@"Press Cmd+Q to quit");
+    NSLog(@"Window created, MTKView configured");
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
