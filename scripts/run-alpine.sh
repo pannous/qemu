@@ -34,8 +34,8 @@ export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:
 export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/builddir/server/virgl_render_server
 
 # Venus/virgl debug (uncomment for troubleshooting)
-export VKR_DEBUG=all
-export MVK_CONFIG_LOG_LEVEL=2
+# export VKR_DEBUG=all
+# export MVK_CONFIG_LOG_LEVEL=2
 
 # Present from host-visible allocations via host Vulkan swapchain (no guest CPU copy)
 : "${VKR_PRESENT_HOSTPTR:=1}"
@@ -46,8 +46,8 @@ export VKR_PRESENT_TIMER
 # Force host pointer import even if fd export is available (needed for host-present path)
 : "${VKR_FORCE_HOSTPTR_IMPORT:=1}"
 export VKR_FORCE_HOSTPTR_IMPORT
-# Debug host-present path (prints first pixel/stride)
-: "${VKR_PRESENT_DEBUG:=1}"
+# Debug host-present path (prints first pixel/stride) - DISABLED to reduce log spam
+: "${VKR_PRESENT_DEBUG:=0}"
 export VKR_PRESENT_DEBUG
 # Ensure IOSurface path doesn't steal presentation from the host swapchain path
 unset VKR_USE_IOSURFACE
