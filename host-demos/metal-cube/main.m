@@ -252,11 +252,17 @@ static const uint16_t cubeIndices[] = {
     self.mtkView.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
     self.mtkView.clearColor = MTLClearColorMake(0.1, 0.1, 0.15, 1.0);
 
+    // Disable VSync and enable continuous rendering for max FPS
+    self.mtkView.enableSetNeedsDisplay = NO;
+    self.mtkView.preferredFramesPerSecond = 0;  // Unlimited FPS
+    self.mtkView.paused = NO;
+
     self.renderer = [[MetalRenderer alloc] initWithDevice:device];
     self.mtkView.delegate = self.renderer;
 
     [self.window setContentView:self.mtkView];
     [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 
     printf("Metal Gradient Cube - Host Performance Baseline\n");
     printf("Press Cmd+Q to quit\n\n");
@@ -271,6 +277,8 @@ static const uint16_t cubeIndices[] = {
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+
         AppDelegate *delegate = [[AppDelegate alloc] init];
         [app setDelegate:delegate];
         [app run];

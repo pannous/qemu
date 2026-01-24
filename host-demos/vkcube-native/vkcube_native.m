@@ -70,7 +70,7 @@ static uint32_t find_mem(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, VkM
         if((bits&(1<<i)) && (p->memoryTypes[i].propertyFlags&flags)==flags) return i;
     return UINT32_MAX;
 }
-#define VK_CHECK(x) do{VkResult r=(x);if(r){printf("VK err %d @ %d\n",r,__LINE__);exit(1);}}while(0)
+#define VK_CHECK(x) do{VkResult r=(x);if(r){printf("VK err %d (%s) @ line %d\n",r,#x,__LINE__);exit(1);}}while(0)
 
 // Vulkan globals
 static VkInstance instance;
@@ -109,10 +109,14 @@ static double getTime() {
 }
 
 void initVulkan(CAMetalLayer *metalLayer) {
-    // Instance
+    // Instance - MoltenVK requires portability enumeration
     VkApplicationInfo appInfo = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    appInfo.apiVersion = VK_API_VERSION_1_0;
-    const char *exts[] = {VK_EXT_METAL_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_EXTENSION_NAME, "VK_KHR_portability_enumeration"};
+    appInfo.apiVersion = VK_API_VERSION_1_1;  // Use 1.1 for better compatibility
+    const char *exts[] = {
+        VK_EXT_METAL_SURFACE_EXTENSION_NAME,
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        "VK_KHR_portability_enumeration"
+    };
     VkInstanceCreateInfo instInfo = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instInfo.pApplicationInfo = &appInfo;
     instInfo.enabledExtensionCount = 3;
@@ -121,8 +125,11 @@ void initVulkan(CAMetalLayer *metalLayer) {
     VK_CHECK(vkCreateInstance(&instInfo, NULL, &instance));
 
     // Physical device
-    uint32_t pdevCount = 1;
-    VK_CHECK(vkEnumeratePhysicalDevices(instance, &pdevCount, &pdev));
+    uint32_t pdevCount = 0;
+    vkEnumeratePhysicalDevices(instance, &pdevCount, NULL);
+    VkPhysicalDevice pdevs[8];
+    VK_CHECK(vkEnumeratePhysicalDevices(instance, &pdevCount, pdevs));
+    pdev = pdevs[0];
 
     // Surface from Metal layer
     VkMetalSurfaceCreateInfoEXT surfInfo = {VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
@@ -141,7 +148,7 @@ void initVulkan(CAMetalLayer *metalLayer) {
         if(qfProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT && surf) { qfIdx = i; break; }
     }
 
-    // Device
+    // Device - MoltenVK is a portability subset driver
     float qPrio = 1.0f;
     VkDeviceQueueCreateInfo qInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qInfo.queueFamilyIndex = qfIdx;
@@ -399,7 +406,8 @@ void initVulkan(CAMetalLayer *metalLayer) {
     }
 
     lastFPSTime = getTime();
-    printf("Native MoltenVK initialized\n");
+    printf("Native MoltenVK initialized successfully!\n");
+    fflush(stdout);
 }
 
 void renderFrame() {
