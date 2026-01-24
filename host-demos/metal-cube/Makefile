@@ -3,7 +3,7 @@ CC := clang
 TARGET := metal-cube
 SOURCES := main.m
 
-FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
+FRAMEWORKS := -framework Cocoa -framework Metal -framework QuartzCore -framework CoreGraphics
 CFLAGS := -fobjc-arc -O3
 
 all: $(TARGET)

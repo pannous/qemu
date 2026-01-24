@@ -1,6 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
-#import <MetalKit/MetalKit.h>
+#import <QuartzCore/CAMetalLayer.h>
 #import <simd/simd.h>
 
 typedef struct {
@@ -36,7 +36,7 @@ static const uint16_t cubeIndices[] = {
     20, 21, 22, 22, 23, 20,  // Bottom
 };
 
-@interface MetalRenderer : NSObject <MTKViewDelegate>
+@interface MetalRenderer : NSObject
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipelineState;
@@ -44,9 +44,12 @@ static const uint16_t cubeIndices[] = {
 @property (nonatomic, strong) id<MTLBuffer> vertexBuffer;
 @property (nonatomic, strong) id<MTLBuffer> indexBuffer;
 @property (nonatomic, strong) id<MTLBuffer> uniformBuffer;
+@property (nonatomic, strong) id<MTLTexture> depthTexture;
 @property (nonatomic, assign) float rotation;
 @property (nonatomic, assign) CFTimeInterval lastFrameTime;
 @property (nonatomic, assign) NSUInteger frameCount;
+@property (nonatomic, assign) NSUInteger totalFrames;
+@property (nonatomic, assign) CFTimeInterval startTime;
 @end
 
 @implementation MetalRenderer
@@ -58,6 +61,8 @@ static const uint16_t cubeIndices[] = {
         _rotation = 0.0f;
         _lastFrameTime = CACurrentMediaTime();
         _frameCount = 0;
+        _totalFrames = 0;
+        _startTime = CACurrentMediaTime();
         [self setupMetal];
     }
     return self;
@@ -155,6 +160,15 @@ static const uint16_t cubeIndices[] = {
     depthDesc.depthCompareFunction = MTLCompareFunctionLess;
     depthDesc.depthWriteEnabled = YES;
     self.depthStencilState = [self.device newDepthStencilStateWithDescriptor:depthDesc];
+
+    // Create depth texture
+    MTLTextureDescriptor *depthTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                            width:800
+                                                                                           height:600
+                                                                                        mipmapped:NO];
+    depthTexDesc.usage = MTLTextureUsageRenderTarget;
+    depthTexDesc.storageMode = MTLStorageModePrivate;
+    self.depthTexture = [self.device newTextureWithDescriptor:depthTexDesc];
 }
 
 - (simd_float4x4)perspectiveWithFovy:(float)fovy aspect:(float)aspect near:(float)near far:(float)far {
@@ -172,22 +186,29 @@ static const uint16_t cubeIndices[] = {
     return simd_matrix(P, Q, R, S);
 }
 
-- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
-}
-
-- (void)drawInMTKView:(MTKView *)view {
+- (void)renderFrame:(CAMetalLayer *)layer {
     static BOOL firstFrame = YES;
+    static int callCount = 0;
+    callCount++;
+
     if (firstFrame) {
         NSLog(@"First frame rendering...");
+        self.startTime = CACurrentMediaTime();
         firstFrame = NO;
     }
 
+    if (callCount < 5) {
+        NSLog(@"renderFrame called %d", callCount);
+    }
+
     self.frameCount++;
+    self.totalFrames++;
     CFTimeInterval currentTime = CACurrentMediaTime();
 
     if (currentTime - self.lastFrameTime >= 1.0) {
-        float fps = self.frameCount / (currentTime - self.lastFrameTime);
-        fprintf(stderr, "FPS: %.1f\n", fps);
+        float instantFPS = self.frameCount / (currentTime - self.lastFrameTime);
+        float avgFPS = self.totalFrames / (currentTime - self.startTime);
+        fprintf(stderr, "FPS: %.1f (avg: %.1f over %llu frames)\n", instantFPS, avgFPS, (unsigned long long)self.totalFrames);
         fflush(stderr);
         self.frameCount = 0;
         self.lastFrameTime = currentTime;
@@ -215,44 +236,66 @@ static const uint16_t cubeIndices[] = {
         (simd_float4){0, 0, 0, 1}
     );
 
-    float aspect = (float)view.drawableSize.width / (float)view.drawableSize.height;
+    float aspect = (float)layer.drawableSize.width / (float)layer.drawableSize.height;
     simd_float4x4 projectionMatrix = [self perspectiveWithFovy:M_PI / 4.0f aspect:aspect near:0.1f far:100.0f];
 
     Uniforms *uniforms = (Uniforms *)[self.uniformBuffer contents];
     uniforms->modelViewProjection = simd_mul(projectionMatrix, simd_mul(viewMatrix, modelMatrix));
 
+    id<CAMetalDrawable> drawable = [layer nextDrawable];
+    if (!drawable) return;
+
+    MTLRenderPassDescriptor *renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
+    renderPass.colorAttachments[0].texture = drawable.texture;
+    renderPass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    renderPass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    renderPass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    renderPass.depthAttachment.texture = self.depthTexture;
+    renderPass.depthAttachment.loadAction = MTLLoadActionClear;
+    renderPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    renderPass.depthAttachment.clearDepth = 1.0;
+
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPass];
+    [encoder setRenderPipelineState:self.pipelineState];
+    [encoder setDepthStencilState:self.depthStencilState];
+    [encoder setVertexBuffer:self.vertexBuffer offset:0 atIndex:0];
+    [encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+    [encoder setCullMode:MTLCullModeBack];
+    [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                        indexCount:sizeof(cubeIndices) / sizeof(uint16_t)
+                         indexType:MTLIndexTypeUInt16
+                       indexBuffer:self.indexBuffer
+                 indexBufferOffset:0];
+    [encoder endEncoding];
 
-    MTLRenderPassDescriptor *renderPass = view.currentRenderPassDescriptor;
-    if (renderPass) {
-        renderPass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);  // Black background
-        renderPass.colorAttachments[0].loadAction = MTLLoadActionClear;
-
-        id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPass];
-        [encoder setRenderPipelineState:self.pipelineState];
-        [encoder setDepthStencilState:self.depthStencilState];
-        [encoder setVertexBuffer:self.vertexBuffer offset:0 atIndex:0];
-        [encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
-        [encoder setCullMode:MTLCullModeBack];
-        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
-        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                            indexCount:sizeof(cubeIndices) / sizeof(uint16_t)
-                             indexType:MTLIndexTypeUInt16
-                           indexBuffer:self.indexBuffer
-                     indexBufferOffset:0];
-        [encoder endEncoding];
-
-        [commandBuffer presentDrawable:view.currentDrawable];
-    }
-
+    [commandBuffer presentDrawable:drawable];
     [commandBuffer commit];
 }
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+// Custom NSView that creates CAMetalLayer with VSync disabled
+@interface MetalView : NSView
+@end
+
+@implementation MetalView
+- (CALayer *)makeBackingLayer {
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.displaySyncEnabled = NO;  // Disable VSync at Metal layer level
+    return layer;
+}
+- (BOOL)wantsUpdateLayer { return YES; }
+@end
+
+@interface AppDelegate : NSObject <NSApplicationDelegate> {
+    dispatch_source_t _displaySource;
+}
 @property (nonatomic, strong) NSWindow *window;
-@property (nonatomic, strong) MTKView *mtkView;
+@property (nonatomic, strong) MetalView *metalView;
 @property (nonatomic, strong) MetalRenderer *renderer;
 @end
 
@@ -276,32 +319,47 @@ static const uint16_t cubeIndices[] = {
         return;
     }
 
-    self.mtkView = [[MTKView alloc] initWithFrame:frame device:device];
-    self.mtkView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    self.mtkView.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
-    self.mtkView.clearColor = MTLClearColorMake(0.1, 0.1, 0.15, 1.0);
+    self.metalView = [[MetalView alloc] initWithFrame:frame];
+    [self.metalView setWantsLayer:YES];
+
+    CAMetalLayer *metalLayer = (CAMetalLayer *)self.metalView.layer;
+    metalLayer.device = device;
+    metalLayer.drawableSize = CGSizeMake(800, 600);
+    metalLayer.framebufferOnly = YES;
+
+    // Check display refresh rate
+    CGDirectDisplayID displayID = CGMainDisplayID();
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
+    double refreshRate = CGDisplayModeGetRefreshRate(mode);
+    if (refreshRate == 0) refreshRate = 60.0;
+    CGDisplayModeRelease(mode);
+    NSLog(@"Display refresh rate: %.1f Hz, VSync disabled: %d", refreshRate, !metalLayer.displaySyncEnabled);
 
     self.renderer = [[MetalRenderer alloc] initWithDevice:device];
-    self.mtkView.delegate = self.renderer;
 
-    // Enable continuous rendering for max FPS
-    self.mtkView.enableSetNeedsDisplay = NO;
-    self.mtkView.paused = NO;
-
-    // Disable VSync by requesting very high refresh rate
-    if (@available(macOS 10.15, *)) {
-        CAMetalLayer *metalLayer = (CAMetalLayer *)self.mtkView.layer;
-        metalLayer.displaySyncEnabled = NO;  // Disable VSync!
-    }
-    self.mtkView.preferredFramesPerSecond = 240;
-
-    [self.window setContentView:self.mtkView];
+    [self.window setContentView:self.metalView];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
     NSLog(@"Metal Gradient Cube - Host Performance Baseline");
     NSLog(@"Press Cmd+Q to quit");
-    NSLog(@"Window created, MTKView configured");
+
+    // Start render loop using GCD for maximum performance
+    NSLog(@"Creating dispatch source...");
+    _displaySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    NSLog(@"Setting timer...");
+    dispatch_source_set_timer(_displaySource, DISPATCH_TIME_NOW, NSEC_PER_SEC / 10000, 0);  // 10000 Hz target, no leeway
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_displaySource, ^{
+        @autoreleasepool {
+            CAMetalLayer *layer = (CAMetalLayer *)weakSelf.metalView.layer;
+            [weakSelf.renderer renderFrame:layer];
+        }
+    });
+
+    dispatch_resume(_displaySource);
+    NSLog(@"Render loop started");
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
