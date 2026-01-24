@@ -54,6 +54,7 @@ make run
 Compare frame times across all platforms:
 - **Native Metal** (metal-cube) - Direct Metal API
 - **WebGPU Browser** (webgpu-cube) - WebGPU → Metal
+- **WebGL Browser** (webgl-cube) - WebGL → Metal/OpenGL 
 - **Native Vulkan** (vkcube-native) - Vulkan → MoltenVK → Metal
 - **Guest Vulkan** (guest-demos/*) - Guest → Venus → virtio-gpu → QEMU → MoltenVK → Metal
 

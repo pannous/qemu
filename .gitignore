@@ -24,3 +24,9 @@ GTAGS
 # Host demo binaries
 host-demos/*/metal-cube
 host-demos/*/vkcube_native
+
+alpine-overlay.qcow2
+
+alpine-efivars.fd
+
+alpine-venus-working-20260120.img

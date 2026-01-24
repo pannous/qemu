@@ -1,11 +1,11 @@
-/* Animated Vulkan cube demo - HOST_VISIBLE + copy path
+/* Animated Vulkan cube demo - HOST_VISIBLE + copy path with 60 FPS vsync
  *
  * Architecture:
  *   VkImage (LINEAR, HOST_VISIBLE) ← render on host
  *        ↓
  *   memcpy to GBM buffer (XRGB8888)
  *        ↓
- *   DRM scanout (drmModeDirtyFB + drmModeSetCrtc)
+ *   DRM scanout with page flip + vsync
  */
 #define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
@@ -15,10 +15,12 @@
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/poll.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <gbm.h>
 #include <vulkan/vulkan.h>
+#include <stdbool.h>
 
 // Rainbow cube vertices: position (x,y,z) + color (r,g,b)
 static const float cube_verts[] = {
@@ -76,6 +78,13 @@ static uint32_t find_mem(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, VkM
 }
 #define VK_CHECK(x) do{VkResult r=(x);if(r){printf("VK err %d @ %d\n",r,__LINE__);exit(1);}}while(0)
 
+// Page flip state
+static bool flip_pending = false;
+static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void *data) {
+    (void)fd; (void)frame; (void)sec; (void)usec; (void)data;
+    flip_pending = false;
+}
+
 int main(void) {
     // === DRM/GBM Setup ===
     int drm_fd = open("/dev/dri/card0", O_RDWR);
@@ -93,17 +102,20 @@ int main(void) {
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
 
-    // Create GBM scanout buffer (XRGB8888 - no alpha!)
+    // Create double-buffered GBM scanout buffers (XRGB8888 - no alpha!)
     struct gbm_device *gbm = gbm_create_device(drm_fd);
-    struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
-                                       GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
-    uint32_t stride = gbm_bo_get_stride(bo);
+    struct gbm_bo *bo[2];
+    uint32_t fb_id[2];
 
-    uint32_t fb_id;
-    uint32_t handles[4] = { gbm_bo_get_handle(bo).u32 };
-    uint32_t strides[4] = { stride };
-    uint32_t offsets[4] = { 0 };
-    drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id, 0);
+    for (int i = 0; i < 2; i++) {
+        bo[i] = gbm_bo_create(gbm, W, H, GBM_FORMAT_XRGB8888,
+                              GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        uint32_t stride = gbm_bo_get_stride(bo[i]);
+        uint32_t handles[4] = { gbm_bo_get_handle(bo[i]).u32 };
+        uint32_t strides[4] = { stride };
+        uint32_t offsets[4] = { 0 };
+        drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id[i], 0);
+    }
 
     // === Vulkan Setup (No External Memory!) ===
     VkInstance instance;
@@ -351,14 +363,29 @@ int main(void) {
     mat4_perspective(proj, 3.14159f/4.0f, (float)W/(float)H, 0.1f, 100.0f);
     mat4_lookat(view, 0, 2, 5, 0, 0, 0, 0, 1, 0);
 
-    printf("Spinning for 10s (HOST_VISIBLE + copy)...\n");
-    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
+    // Set initial mode
+    drmModeSetCrtc(drm_fd, crtc_id, fb_id[0], 0, 0, &conn->connector_id, 1, mode);
+
+    printf("Spinning at 60 FPS with vsync (press Ctrl+C to stop)...\n");
+    struct timespec start, last_frame;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    last_frame = start;
     int frames = 0;
+    int current_buffer = 0;
+
+    // Frame timing tracking
+    double frame_times[60] = {0};
+    int frame_time_idx = 0;
+
+    // DRM event handling setup
+    drmEventContext ev = {
+        .version = DRM_EVENT_CONTEXT_VERSION,
+        .page_flip_handler = page_flip_handler,
+    };
 
     while(1) {
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
         float t = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9f;
-        if (t > 10.0f) break;
 
         // Update MVP
         mat4 rotY, rotX, model, mv, mvp;
@@ -394,26 +421,60 @@ int main(void) {
         VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
         vkResetFences(device, 1, &fence);
 
-        // Copy VkImage to GBM buffer (like test_tri)
+        // Calculate frame time
+        struct timespec frame_start = now;
+        double frame_delta = (now.tv_sec - last_frame.tv_sec) +
+                            (now.tv_nsec - last_frame.tv_nsec) / 1e9;
+        frame_times[frame_time_idx] = frame_delta * 1000.0; // ms
+        frame_time_idx = (frame_time_idx + 1) % 60;
+
+        // Copy VkImage to current GBM buffer
         void *gbmPtr = NULL; uint32_t gbmStride;
         void *mapData = NULL;
-        gbmPtr = gbm_bo_map(bo, 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbmStride, &mapData);
+        gbmPtr = gbm_bo_map(bo[current_buffer], 0, 0, W, H, GBM_BO_TRANSFER_WRITE, &gbmStride, &mapData);
         if (gbmPtr) {
             for (uint32_t y = 0; y < H; y++) {
                 memcpy((char*)gbmPtr + y * gbmStride,
                        (char*)rtPtr + layout.offset + y * layout.rowPitch,
                        W * 4);
             }
-            gbm_bo_unmap(bo, mapData);
+            gbm_bo_unmap(bo[current_buffer], mapData);
         }
 
-        // Display via DRM
-        drmModeDirtyFB(drm_fd, fb_id, &(drmModeClip){0, 0, W, H}, 1);
-        drmModeSetCrtc(drm_fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1, mode);
+        // Page flip with vsync
+        flip_pending = true;
+        if (drmModePageFlip(drm_fd, crtc_id, fb_id[current_buffer], DRM_MODE_PAGE_FLIP_EVENT, NULL) < 0) {
+            // Fallback to immediate mode if page flip fails
+            drmModeSetCrtc(drm_fd, crtc_id, fb_id[current_buffer], 0, 0, &conn->connector_id, 1, mode);
+            flip_pending = false;
+        }
+
+        // Wait for vsync event
+        while (flip_pending) {
+            struct pollfd pfd = { .fd = drm_fd, .events = POLLIN };
+            if (poll(&pfd, 1, 100) > 0) {
+                drmHandleEvent(drm_fd, &ev);
+            }
+        }
+
+        // Print FPS stats every 60 frames
+        if (frames > 0 && frames % 60 == 0) {
+            double avg_frame_time = 0;
+            for (int i = 0; i < 60; i++) avg_frame_time += frame_times[i];
+            avg_frame_time /= 60.0;
+            printf("Frame %d: %.2f ms/frame (%.1f FPS)\n",
+                   frames, avg_frame_time, 1000.0 / avg_frame_time);
+        }
+
+        current_buffer = 1 - current_buffer;
+        last_frame = now;
         frames++;
     }
 
-    printf("Done! %d frames (%.1f fps) - HOST_VISIBLE + copy\n", frames, frames/10.0f);
+    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &end);
+    float total_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9f;
+    printf("\nDone! %d frames in %.2fs (%.1f fps avg) - HOST_VISIBLE + copy + vsync\n",
+           frames, total_time, frames / total_time);
 
     vkUnmapMemory(device, rtMem);
     vkUnmapMemory(device, uboMem);
@@ -443,8 +504,10 @@ int main(void) {
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
 
-    drmModeRmFB(drm_fd, fb_id);
-    gbm_bo_destroy(bo);
+    for (int i = 0; i < 2; i++) {
+        drmModeRmFB(drm_fd, fb_id[i]);
+        gbm_bo_destroy(bo[i]);
+    }
     gbm_device_destroy(gbm);
     close(drm_fd);
 
