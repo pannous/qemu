@@ -166,6 +166,17 @@ void initVulkan(CAMetalLayer *metalLayer) {
     // Swapchain
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pdev, surface, &caps);
+
+    // Query available present modes
+    uint32_t pmCount = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pdev, surface, &pmCount, NULL);
+    VkPresentModeKHR pmodes[16];
+    vkGetPhysicalDeviceSurfacePresentModesKHR(pdev, surface, &pmCount, pmodes);
+    fprintf(stderr, "Available present modes: ");
+    for(uint32_t i=0; i<pmCount; i++) fprintf(stderr, "%d ", pmodes[i]);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+
     VkSwapchainCreateInfoKHR swInfo = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     swInfo.surface = surface;
     swInfo.minImageCount = caps.minImageCount < 3 ? caps.minImageCount + 1 : 3;
@@ -178,6 +189,8 @@ void initVulkan(CAMetalLayer *metalLayer) {
     swInfo.preTransform = caps.currentTransform;
     swInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;  // Uncapped FPS, no VSync
+    fprintf(stderr, "Using present mode: %d (IMMEDIATE)\n", swInfo.presentMode);
+    fflush(stderr);
     VK_CHECK(vkCreateSwapchainKHR(device, &swInfo, NULL, &swapchain));
 
     swapCount = 8;
@@ -496,6 +509,7 @@ void renderFrame() {
 - (CALayer *)makeBackingLayer {
     CAMetalLayer *layer = [CAMetalLayer layer];
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.displaySyncEnabled = NO;  // Disable VSync at Metal layer level
     return layer;
 }
 - (BOOL)wantsUpdateLayer { return YES; }
@@ -505,7 +519,7 @@ void renderFrame() {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSWindow *window;
 @property (strong) VulkanView *view;
-@property (strong) NSTimer *timer;
+@property (assign) BOOL running;
 @end
 
 @implementation AppDelegate
@@ -526,19 +540,18 @@ void renderFrame() {
     CAMetalLayer *metalLayer = (CAMetalLayer *)self.view.layer;
     initVulkan(metalLayer);
 
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:0.001  // ~1000 FPS max, uncapped
-                                                  target:self
-                                                selector:@selector(renderFrame:)
-                                                userInfo:nil
-                                                 repeats:YES];
-}
-
-- (void)renderFrame:(NSTimer *)timer {
-    renderFrame();
+    // Run render loop on background thread for max performance
+    self.running = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        while(self.running) {
+            renderFrame();
+        }
+    });
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    [self.timer invalidate];
+    self.running = NO;
+    usleep(100000);  // Give render thread time to exit
     vkDeviceWaitIdle(device);
 }
 
