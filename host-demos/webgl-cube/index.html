@@ -89,45 +89,63 @@
             20, 21, 22,  22, 23, 20,  // Bottom
         ]);
 
-        // Matrix operations (column-major for WebGL)
-        function perspective(fovy, aspect, near, far) {
-            const f = 1.0 / Math.tan(fovy / 2);
-            const nf = 1 / (near - far);
+        // Matrix operations - proper column-major for WebGL
+        function perspective(fov, aspect, near, far) {
+            const f = 1.0 / Math.tan(fov / 2);
+            const rangeInv = 1.0 / (near - far);
+
+            // Column-major perspective matrix
             return new Float32Array([
                 f / aspect, 0, 0, 0,
                 0, f, 0, 0,
-                0, 0, (far + near) * nf, 2 * far * near * nf,
-                0, 0, -1, 0
+                0, 0, (near + far) * rangeInv, -1,
+                0, 0, near * far * rangeInv * 2, 0
+            ]);
+        }
+
+        function translate(x, y, z) {
+            return new Float32Array([
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                x, y, z, 1
+            ]);
+        }
+
+        function rotateX(angle) {
+            const c = Math.cos(angle);
+            const s = Math.sin(angle);
+            return new Float32Array([
+                1, 0, 0, 0,
+                0, c, s, 0,
+                0, -s, c, 0,
+                0, 0, 0, 1
+            ]);
+        }
+
+        function rotateY(angle) {
+            const c = Math.cos(angle);
+            const s = Math.sin(angle);
+            return new Float32Array([
+                c, 0, -s, 0,
+                0, 1, 0, 0,
+                s, 0, c, 0,
+                0, 0, 0, 1
             ]);
         }
 
         function multiply(a, b) {
             const result = new Float32Array(16);
-            for (let i = 0; i < 4; i++) {
-                for (let j = 0; j < 4; j++) {
-                    result[i * 4 + j] =
-                        a[i * 4 + 0] * b[0 * 4 + j] +
-                        a[i * 4 + 1] * b[1 * 4 + j] +
-                        a[i * 4 + 2] * b[2 * 4 + j] +
-                        a[i * 4 + 3] * b[3 * 4 + j];
+            for (let row = 0; row < 4; row++) {
+                for (let col = 0; col < 4; col++) {
+                    result[col * 4 + row] =
+                        a[0 * 4 + row] * b[col * 4 + 0] +
+                        a[1 * 4 + row] * b[col * 4 + 1] +
+                        a[2 * 4 + row] * b[col * 4 + 2] +
+                        a[3 * 4 + row] * b[col * 4 + 3];
                 }
             }
             return result;
-        }
-
-        function rotationMatrix(angle) {
-            const rotY = Math.cos(angle);
-            const rotYsin = Math.sin(angle);
-            const rotX = Math.cos(angle * 0.7);
-            const rotXsin = Math.sin(angle * 0.7);
-
-            // Column-major matrix for WebGL
-            return new Float32Array([
-                rotY, rotYsin * rotXsin, -rotYsin * rotX, 0,
-                0, rotX, rotXsin, 0,
-                rotYsin, -rotY * rotXsin, rotY * rotX, 0,
-                0, 0, -6, 1  // Translation in last column (z=-6, further back for better view)
-            ]);
         }
 
         // Initialize WebGL
@@ -230,8 +248,17 @@
             // Calculate MVP matrix
             const aspect = canvas.width / canvas.height;
             const projection = perspective(Math.PI / 4, aspect, 0.1, 100.0);
-            const model = rotationMatrix(rotation);
-            const mvp = multiply(projection, model);
+
+            // Model matrix: rotate around Y and X axes
+            let model = rotateY(rotation);
+            model = multiply(model, rotateX(rotation * 0.7));
+
+            // View matrix: translate back so we can see the cube
+            const view = translate(0, 0, -5);
+
+            // Combine: projection * view * model
+            let mvp = multiply(view, model);
+            mvp = multiply(projection, mvp);
 
             // Use program
             gl.useProgram(program);
