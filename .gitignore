@@ -32,3 +32,8 @@ alpine-efivars.fd
 alpine-venus-working-20260120.img
 
 alpine-venus.img
+
+alpine-venus.working.64kblob.img
+
+# Ignore all large disk images
+*.img
