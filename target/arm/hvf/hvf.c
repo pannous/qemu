@@ -1737,6 +1737,9 @@ static int hvf_wfi(CPUState *cpu)
      * WFI WORKAROUND: HVF's WFI returns spuriously on macOS, causing tight CPU spinning.
      * Instead of full halt (which breaks early boot), add delay to reduce CPU usage.
      * 1ms delay achieves good balance: system is responsive but doesn't waste CPU.
+     *
+     * NOTE: Delay is NEEDED - without it boot is even slower (84s vs 52s to first kernel msg).
+     * Boot takes ~4min either way, but delay reduces CPU usage and actually improves boot time.
      */
     g_usleep(1000);
     return EXCP_HLT;
