@@ -30,10 +30,11 @@ alpine-overlay.qcow2
 alpine-efivars.fd
 
 alpine-venus-working-20260120.img
-
 alpine-venus.img
-
 alpine-venus.working.64kblob.img
+scripts/alpine-virt-16k.img
 
-# Ignore all large disk images
-*.img
+# Ignore large disk images but not pc-bios firmware
+/*.img
+scripts/*.img
+!pc-bios/*.img
