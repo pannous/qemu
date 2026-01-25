@@ -26,6 +26,7 @@ host-demos/*/metal-cube
 host-demos/*/vkcube_native
 
 alpine-overlay.qcow2
+alpine-overlay.qcow2.*
 
 alpine-efivars.fd
 
