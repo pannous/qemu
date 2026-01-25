@@ -1734,15 +1734,13 @@ static int hvf_wfi(CPUState *cpu)
     }
 
     /*
-     * WFI WORKAROUND: HVF's WFI returns spuriously on macOS, causing tight CPU spinning.
+     * redox WFI WORKAROUND: HVF's WFI returns spuriously on macOS, causing tight CPU spinning.
      * Instead of full halt (which breaks early boot), add delay to reduce CPU usage.
      * 1ms delay achieves good balance: system is responsive but doesn't waste CPU.
-     *
-     * NOTE: Delay is NEEDED - without it boot is even slower (84s vs 52s to first kernel msg).
-     * Boot takes ~4min either way, but delay reduces CPU usage and actually improves boot time.
      */
-    g_usleep(1000);
-    return EXCP_HLT;
+    // g_usleep(1000); NO!!! CAUSES 200 SECOND DELAY in ./scripts/run-alpine.sh !!!!
+    // g_usleep(1); // reduces CPU from 300% to 80% but alpine boot is 20 sec instead of 1!!! 
+    return EXCP_HLT; // CPU at 300% during idle but 1 sec boot time for alpine!!
 }
 
 /* Must be called by the owning thread */

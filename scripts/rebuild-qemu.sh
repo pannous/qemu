@@ -14,8 +14,11 @@ echo "- Uses macOS native ar/ranlib (critical - GNU ar creates incompatible arch
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" 
+SCRIPT_DIR="$(cd -P "$(dirname "$(greadlink -f "$0")")" && pwd)"
+echo SCRIPT_DIR $SCRIPT_DIR
 QEMU_DIR="$(dirname "$SCRIPT_DIR")"
+echo QEMU_DIR $QEMU_DIR
 BUILD_DIR="$QEMU_DIR/build"
 JOBS=$(sysctl -n hw.ncpu)
 

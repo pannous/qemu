@@ -26,12 +26,23 @@ EFI_VARS="${QEMU_DIR}/alpine-efivars.fd"
 # MoltenVK ICD - correct path for Homebrew installation
 export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/MoltenVK_icd.json
 
-# Vulkan loader library path for virglrenderer Venus backend
-# Put custom virglrenderer FIRST so it's found before homebrew version
-export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
+# Vulkan loader library path for virglrenderer Venus development backend
+# rebuild dependency /opt/other/virglrenderer/build.sh
+export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/build/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
+# In release you can pick the following:
+# export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
-# Use custom virglrenderer render_server from builddir (not installed)
-export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/install/libexec/virgl_render_server
+
+# Put custom virglrenderer FIRST so it's found before homebrew version
+  # - For development, you typically want to use the build directory version because:                 
+  #   - You don't need to run meson install every time you rebuild                                    
+  #   - It's faster for iterative development                                                         
+  #   - The meson devenv setup (lines 356-363 in meson.build) specifically sets it to the build       
+  # directory version                                                                                 
+  # - For production/deployment, you'd use the installed version         
+# Use custom virglrenderer render_server from build (not installed)
+export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/build/server/virgl_render_server
+# export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/install/libexec/virgl_render_server
 
 # Venus/virgl debug (uncomment for troubleshooting)
 # export VKR_DEBUG=all
