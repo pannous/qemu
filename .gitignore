@@ -39,3 +39,5 @@ scripts/alpine-virt-16k.img
 /*.img
 scripts/*.img
 !pc-bios/*.img
+
+.git-rewrite
