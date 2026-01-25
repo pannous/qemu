@@ -17,6 +17,7 @@ The logs come from debug code in virglrenderer. To disable them:
 ### Option 1: Environment Variable (Guest)
 ```bash
 export VIRGL_DEBUG=0
+unset VKR_PRESENT_DEBUG
 ./vkcube_anim
 ```
 
