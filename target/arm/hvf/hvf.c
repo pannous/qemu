@@ -1733,6 +1733,12 @@ static int hvf_wfi(CPUState *cpu)
         return 0;
     }
 
+    /*
+     * WFI WORKAROUND: HVF's WFI returns spuriously on macOS, causing tight CPU spinning.
+     * Instead of full halt (which breaks early boot), add delay to reduce CPU usage.
+     * 1ms delay achieves good balance: system is responsive but doesn't waste CPU.
+     */
+    g_usleep(1000);
     return EXCP_HLT;
 }
 
