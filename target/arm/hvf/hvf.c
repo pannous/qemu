@@ -1725,22 +1725,51 @@ static uint64_t hvf_vtimer_val_raw(void)
 
 static int hvf_wfi(CPUState *cpu)
 {
+    static int64_t vm_start_time = 0;
+    static int sleep_us = -1;  /* -1 = not initialized, 0 = disabled, >0 = microseconds */
+    static bool init_done = false;
+
     if (cpu_has_work(cpu)) {
-        /*
-         * Don't bother to go into our "low power state" if
-         * we would just wake up immediately.
-         */
         return 0;
     }
 
-    /*
-     * redox WFI WORKAROUND: HVF's WFI returns spuriously on macOS, causing tight CPU spinning.
-     * Instead of full halt (which breaks early boot), add delay to reduce CPU usage.
-     * 1ms delay achieves good balance: system is responsive but doesn't waste CPU.
-     */
-    // g_usleep(1000); NO!!! CAUSES 200 SECOND DELAY in ./scripts/run-alpine.sh !!!!
-    // g_usleep(1); // reduces CPU from 300% to 80% but alpine boot is 20 sec instead of 1!!! 
-    return EXCP_HLT; // CPU at 300% during idle but 1 sec boot time for alpine!!
+    /* One-time initialization: read env var and start timer */
+    if (!init_done) {
+        init_done = true;
+        vm_start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+        const char *sleep_env = getenv("HVF_WFI_SLEEP");
+        if (sleep_env) {
+            sleep_us = atoi(sleep_env);
+            if (sleep_us > 0) {
+                fprintf(stderr, "HVF: WFI sleep configured: %d μs (activates after 15s)\n", sleep_us);
+                fflush(stderr);
+            } else {
+                fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=%s)\n", sleep_env);
+                fflush(stderr);
+            }
+        } else {
+            sleep_us = 0;
+            fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP not set)\n");
+            fflush(stderr);
+        }
+    }
+
+    /* Apply sleep only after boot phase (15 seconds) */
+    if (sleep_us > 0) {
+        int64_t elapsed_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - vm_start_time;
+        if (elapsed_ms > 15000) {
+            static bool activation_logged = false;
+            if (!activation_logged) {
+                fprintf(stderr, "HVF: WFI sleep NOW ACTIVE (%d μs per WFI)\n", sleep_us);
+                fflush(stderr);
+                activation_logged = true;
+            }
+            g_usleep(sleep_us);
+        }
+    }
+
+    return EXCP_HLT;
 }
 
 /* Must be called by the owning thread */
