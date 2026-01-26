@@ -22,6 +22,12 @@ export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/Mo
 # Put custom virglrenderer FIRST so it's found before homebrew version
 export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
+# HVF WFI Sleep: Reduce idle CPU usage from 300% to 6-7%
+# Activates after 15s (doesn't affect boot time)
+# Set to 0 to disable, or 10 for mild reduction
+: "${HVF_WFI_SLEEP:=100}"
+export HVF_WFI_SLEEP
+
 # Use custom virglrenderer render_server from build (not installed)
 export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/build/server/virgl_render_server
 
