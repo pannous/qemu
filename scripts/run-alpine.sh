@@ -32,11 +32,12 @@ export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/build/lib:/opt/homebrew/lib:${
 # In release you can pick the following:
 # export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
-# HVF WFI Sleep: Reduce idle CPU usage from 300% to 6-7%
-# Activates after 15s (doesn't affect boot time)
-# Set to 0 to disable, or 10 for mild reduction
-: "${HVF_WFI_SLEEP:=100}"
-export HVF_WFI_SLEEP
+# HVF WFI Sleep: Default is 100μs (reduces idle CPU from 300% to 6-7%)
+# Override if needed: export HVF_WFI_SLEEP=0 (disable) or HVF_WFI_SLEEP=10 (mild)
+# Activates after 15s boot phase, doesn't affect boot time
+if [ -n "${HVF_WFI_SLEEP:-}" ]; then
+    export HVF_WFI_SLEEP
+fi
 
 
 # Put custom virglrenderer FIRST so it's found before homebrew version
