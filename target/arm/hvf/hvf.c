@@ -1741,18 +1741,17 @@ static int hvf_wfi(CPUState *cpu)
         const char *sleep_env = getenv("HVF_WFI_SLEEP");
         if (sleep_env) {
             sleep_us = atoi(sleep_env);
-            if (sleep_us > 0) {
-                fprintf(stderr, "HVF: WFI sleep configured: %d μs (activates after 15s)\n", sleep_us);
-                fflush(stderr);
-            } else {
-                fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=%s)\n", sleep_env);
-                fflush(stderr);
-            }
         } else {
-            sleep_us = 0;
-            fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP not set)\n");
-            fflush(stderr);
+            /* Default: 100μs sleep (reduces idle CPU from 300% to 6-7%) */
+            sleep_us = 100;
         }
+
+        if (sleep_us > 0) {
+            fprintf(stderr, "HVF: WFI sleep: %d μs (activates after 15s boot phase)\n", sleep_us);
+        } else {
+            fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=0)\n");
+        }
+        fflush(stderr);
     }
 
     /* Apply sleep only after boot phase (15 seconds) */

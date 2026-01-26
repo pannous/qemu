@@ -10,17 +10,27 @@ HVF on macOS has spurious WFI (Wait For Interrupt) wakeups causing:
 ## Solution
 
 Adaptive WFI sleep controlled by `HVF_WFI_SLEEP` environment variable:
-- Disabled by default (safe, no behavior change)
+- **Default: 100μs sleep** (reduces idle CPU to 6-7%)
 - Activates **after 15 seconds** (preserves fast boot)
 - Adds microsecond sleep per WFI call when idle
 - System remains fully responsive (CPU scales up during activity)
+- Override via environment variable if needed
 
 ## Usage
 
-### Quick Start (Recommended)
+### Quick Start
+
+Just run QEMU normally - **100μs sleep is enabled by default**:
 
 ```bash
-export HVF_WFI_SLEEP=100  # Best balance
+./scripts/run-alpine.sh  # Uses default (100μs)
+```
+
+To customize or disable:
+
+```bash
+export HVF_WFI_SLEEP=10   # Mild reduction
+export HVF_WFI_SLEEP=0    # Disable (legacy 300% CPU behavior)
 ./scripts/run-alpine.sh
 ```
 
@@ -28,9 +38,10 @@ export HVF_WFI_SLEEP=100  # Best balance
 
 | Value | Sleep | Idle CPU | Use Case |
 |-------|-------|----------|----------|
-| `0` or unset | None | ~300% | Default (current behavior) |
+| (unset) | 100μs | ~6-7% | **Default** - best balance |
+| `0` | None | ~300% | Disable (legacy behavior) |
 | `10` | 10μs | ~30-40% | Mild reduction, very responsive |
-| `100` | 100μs | ~6-7% | **Recommended** - best balance |
+| `100` | 100μs | ~6-7% | Same as default |
 | `1000` | 1ms | ~5% | Max reduction (may affect responsiveness) |
 
 ### Performance Results (HVF_WFI_SLEEP=100)
