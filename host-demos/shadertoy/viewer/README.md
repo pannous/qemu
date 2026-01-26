@@ -48,6 +48,11 @@ export DYLD_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_LIBRARY_PATH
 ./shadertoy_viewer
 ```
 
+### Controls
+
+- **F** or **F11** - Toggle fullscreen mode
+- **ESC** - Exit viewer
+
 ## Current Shader
 
 **Bumped Sinusoidal Warp** - A beautiful metallic surface with:
@@ -57,17 +62,42 @@ export DYLD_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_LIBRARY_PATH
 - Specular highlights
 - Faux environment mapping
 
-Press ESC or close the window to exit.
+## Included Example Shaders
+
+Try different shaders using `./switch_shader.sh`:
+
+```bash
+./switch_shader.sh simple_gradient  # Animated color gradient
+./switch_shader.sh tunnel           # Classic tunnel effect
+./switch_shader.sh plasma           # Plasma waves
+./switch_shader.sh shadertoy        # Back to default
+```
+
+After switching, run `./run.sh` to view the new shader.
 
 ## Adding New Shaders
 
-1. Save ShaderToy shader as `.shade` file (or any extension)
-2. Convert to Vulkan GLSL format:
+### From ShaderToy Website
+
+1. Visit [ShaderToy](https://www.shadertoy.com/) and find a shader you like
+2. Copy the shader code
+3. Convert to Vulkan GLSL format (see HOWTO.md):
    - Replace `mainImage(out vec4 fragColor, in vec2 fragCoord)` with `main()`
+   - Add Vulkan header and uniform buffer declarations
    - Use `ubo.iTime`, `ubo.iResolution`, `ubo.iMouse` for uniforms
-   - Update `layout(binding = 1) uniform sampler2D iChannel0` for textures
-3. Compile to SPIR-V: `glslangValidator -V yourshader.frag -o frag.spv`
-4. Run viewer
+4. Save to `examples/yourshader.frag`
+5. Switch to it: `./switch_shader.sh yourshader`
+
+### Download Shader Packs
+
+Several pre-compiled ShaderToy collections are available:
+
+- **[Geeks3D Shadertoy Demopack](https://www.geeks3d.com/hacklab/20231203/shadertoy-demopack-v23-12-3/)** - Curated collection with single-pass and multi-pass shaders
+- **[Raspberry Pi ShaderToy Collection](https://forums.raspberrypi.com/viewtopic.php?t=247036)** - 100+ OpenGL ES 3.0 examples
+- **[VirtualDJ Shaders Pack](https://www.virtualdjskins.co.uk/blog/shaders-for-virtualdj)** - 450+ shaders optimized for real-time use
+- **[shadertoy-rs](https://github.com/fmenozzi/shadertoy-rs)** - Desktop client to browse and download shaders
+
+Note: Downloaded shaders will need conversion to Vulkan GLSL format.
 
 ## Technical Details
 

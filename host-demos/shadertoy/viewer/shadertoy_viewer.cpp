@@ -78,6 +78,45 @@ private:
     std::vector<VkDescriptorSet> descriptorSets;
 
     std::chrono::steady_clock::time_point startTime;
+    bool isFullscreen = false;
+    int windowedWidth = WIDTH;
+    int windowedHeight = HEIGHT;
+    int windowedPosX = 0;
+    int windowedPosY = 0;
+
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+        if (action == GLFW_PRESS) {
+            ShaderToyViewer* viewer = static_cast<ShaderToyViewer*>(glfwGetWindowUserPointer(window));
+
+            if (key == GLFW_KEY_ESCAPE) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } else if (key == GLFW_KEY_F || key == GLFW_KEY_F11) {
+                viewer->toggleFullscreen();
+            }
+        }
+    }
+
+    void toggleFullscreen() {
+        isFullscreen = !isFullscreen;
+
+        if (isFullscreen) {
+            // Save windowed position and size
+            glfwGetWindowPos(window, &windowedPosX, &windowedPosY);
+            glfwGetWindowSize(window, &windowedWidth, &windowedHeight);
+
+            // Get primary monitor and its video mode
+            GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+            const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+
+            // Switch to fullscreen
+            glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+            std::cout << "✓ Switched to fullscreen: " << mode->width << "x" << mode->height << std::endl;
+        } else {
+            // Switch back to windowed mode
+            glfwSetWindowMonitor(window, nullptr, windowedPosX, windowedPosY, windowedWidth, windowedHeight, 0);
+            std::cout << "✓ Switched to windowed mode: " << windowedWidth << "x" << windowedHeight << std::endl;
+        }
+    }
 
     void initWindow() {
         if (!glfwInit()) {
@@ -94,6 +133,11 @@ private:
         if (!window) {
             throw std::runtime_error("Failed to create GLFW window!");
         }
+
+        // Set user pointer for callback access
+        glfwSetWindowUserPointer(window, this);
+        glfwSetKeyCallback(window, keyCallback);
+
         std::cout << "✓ GLFW window created" << std::endl;
         startTime = std::chrono::steady_clock::now();
     }
@@ -973,7 +1017,9 @@ private:
 
     void mainLoop() {
         std::cout << "✓ Running ShaderToy shader via Vulkan → MoltenVK → Metal" << std::endl;
-        std::cout << "Press ESC or close window to exit" << std::endl;
+        std::cout << "Controls:" << std::endl;
+        std::cout << "  F or F11 - Toggle fullscreen" << std::endl;
+        std::cout << "  ESC - Exit" << std::endl;
 
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
