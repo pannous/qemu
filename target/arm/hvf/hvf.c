@@ -1726,10 +1726,14 @@ static uint64_t hvf_vtimer_val_raw(void)
 static int hvf_wfi(CPUState *cpu)
 {
     static int64_t vm_start_time = 0;
-    static int sleep_us = -1;  /* -1 = not initialized, 0 = disabled, >0 = microseconds */
+    static int max_sleep_us = -1;  /* -1 = not initialized, 0 = disabled, >0 = max microseconds */
     static bool init_done = false;
+    static int consecutive_idles = 0;
+    static int64_t last_wfi_time = 0;
 
     if (cpu_has_work(cpu)) {
+        /* Reset idle counter when there's work */
+        consecutive_idles = 0;
         return 0;
     }
 
@@ -1740,31 +1744,56 @@ static int hvf_wfi(CPUState *cpu)
 
         const char *sleep_env = getenv("HVF_WFI_SLEEP");
         if (sleep_env) {
-            sleep_us = atoi(sleep_env);
+            max_sleep_us = atoi(sleep_env);
         } else {
-            /* Default: 100μs sleep (reduces idle CPU from 300% to 6-7%) */
-            sleep_us = 100;
+            /* Default: disabled (safe, opt-in only) */
+            max_sleep_us = 0;
         }
 
-        if (sleep_us > 0) {
-            fprintf(stderr, "HVF: WFI sleep: %d μs (activates after 15s boot phase)\n", sleep_us);
+        if (max_sleep_us > 0) {
+            fprintf(stderr, "HVF: WFI adaptive sleep: max %d μs (activates after 15s, requires sustained idle)\n", max_sleep_us);
         } else {
-            fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=0)\n");
+            fprintf(stderr, "HVF: WFI sleep disabled (set HVF_WFI_SLEEP=100 to enable)\n");
         }
         fflush(stderr);
     }
 
-    /* Apply sleep only after boot phase (15 seconds) */
-    if (sleep_us > 0) {
+    /* Only sleep if enabled and past boot phase */
+    if (max_sleep_us > 0) {
         int64_t elapsed_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - vm_start_time;
         if (elapsed_ms > 15000) {
-            static bool activation_logged = false;
-            if (!activation_logged) {
-                fprintf(stderr, "HVF: WFI sleep NOW ACTIVE (%d μs per WFI)\n", sleep_us);
-                fflush(stderr);
-                activation_logged = true;
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+            /* Check if WFIs are happening rapidly (less than 1ms apart = active system) */
+            if (last_wfi_time > 0 && (now - last_wfi_time) < 1000000) {  /* 1ms in ns */
+                consecutive_idles++;
+            } else {
+                /* Large gap or first call - reset counter */
+                consecutive_idles = 1;
             }
-            g_usleep(sleep_us);
+            last_wfi_time = now;
+
+            /* Only sleep after 50+ consecutive rapid WFIs (truly idle) */
+            if (consecutive_idles > 50) {
+                /* Adaptive sleep: start small, ramp up to max */
+                int sleep_us;
+                if (consecutive_idles < 100) {
+                    sleep_us = max_sleep_us / 10;  /* 10% of max */
+                } else if (consecutive_idles < 200) {
+                    sleep_us = max_sleep_us / 4;   /* 25% of max */
+                } else if (consecutive_idles < 500) {
+                    sleep_us = max_sleep_us / 2;   /* 50% of max */
+                } else {
+                    sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
+                }
+
+                if (consecutive_idles == 51) {
+                    fprintf(stderr, "HVF: WFI sleep NOW ACTIVE (adaptive: %d -> %d μs)\n",
+                            sleep_us, max_sleep_us);
+                    fflush(stderr);
+                }
+                g_usleep(sleep_us);
+            }
         }
     }
 
