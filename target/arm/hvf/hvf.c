@@ -1755,7 +1755,7 @@ static int hvf_wfi(CPUState *cpu)
         }
 
         if (max_sleep_us > 0) {
-            fprintf(stderr, "HVF: WFI adaptive sleep: max %d μs (requires 500+ consecutive idles)\n", max_sleep_us);
+            fprintf(stderr, "HVF: WFI adaptive sleep: max %d μs (activates during sustained idle)\n", max_sleep_us);
         } else {
             fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=0)\n");
         }
@@ -1769,14 +1769,14 @@ static int hvf_wfi(CPUState *cpu)
             int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
             /* After activity reset, require cooldown period before counting again */
-            if (last_reset_time > 0 && (now - last_reset_time) < 500000000) {  /* 500ms cooldown */
+            if (last_reset_time > 0 && (now - last_reset_time) < 100000000) {  /* 100ms cooldown */
                 consecutive_idles = 0;
                 last_wfi_time = now;
                 return EXCP_HLT;
             }
 
-            /* Check if WFIs are happening rapidly (less than 100μs apart = very rapid) */
-            if (last_wfi_time > 0 && (now - last_wfi_time) < 100000) {  /* 100μs in ns */
+            /* Check if WFIs are happening rapidly (less than 1ms apart) */
+            if (last_wfi_time > 0 && (now - last_wfi_time) < 1000000) {  /* 1ms in ns */
                 consecutive_idles++;
             } else {
                 /* Large gap or first call - reset counter */
@@ -1787,15 +1787,15 @@ static int hvf_wfi(CPUState *cpu)
             }
             last_wfi_time = now;
 
-            /* Only sleep after 500+ consecutive rapid WFIs (truly deeply idle) */
-            if (consecutive_idles > 500) {
+            /* Only sleep after 200+ consecutive rapid WFIs (sustained idle) */
+            if (consecutive_idles > 200) {
                 /* Adaptive sleep: start small, ramp up to max */
                 int sleep_us;
-                if (consecutive_idles < 1000) {
+                if (consecutive_idles < 500) {
                     sleep_us = max_sleep_us / 10;  /* 10% of max */
-                } else if (consecutive_idles < 2000) {
+                } else if (consecutive_idles < 1000) {
                     sleep_us = max_sleep_us / 4;   /* 25% of max */
-                } else if (consecutive_idles < 5000) {
+                } else if (consecutive_idles < 2000) {
                     sleep_us = max_sleep_us / 2;   /* 50% of max */
                 } else {
                     sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
