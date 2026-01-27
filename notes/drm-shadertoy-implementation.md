@@ -65,19 +65,34 @@ Guest Shader → VkImage (LINEAR, HOST_VISIBLE)
 | Architecture | Surface + Swapchain | Direct scanout |
 | Platform | macOS (MoltenVK) | Alpine (Venus) |
 
-## Current Status
+## Current Status (2026-01-27 - Latest Debug Session)
 
-### Working
+### Working ✅
 - ✅ Compiles successfully with gcc
 - ✅ No GLFW/Wayland dependencies
 - ✅ Follows proven DRM pattern
 - ✅ ShaderToy uniform system
 - ✅ Animation loop structure
+- ✅ **ALL Vulkan setup completes successfully**:
+  - Instance/device creation
+  - Image creation (LINEAR tiling, HOST_VISIBLE)
+  - Image view creation
+  - Render pass creation
+  - Framebuffer creation
+  - Shader module loading
+  - Uniform buffer creation
+  - Descriptor set layout/pool/allocation
+  - Pipeline layout creation
+  - Graphics pipeline creation
+  - Command pool/buffer creation
+  - Fence creation
 
-### Not Working
-- ❌ Venus initialization fails with `vn_ring_submit abort on fatal`
-- ❌ Unable to test actual rendering
-- ❓ Unknown if triangle/vkcube demos still work in guest
+### Crash Point Identified 🔍
+- ❌ **Crash at `vkCmdBeginRenderPass`** in first frame of render loop
+- Error: `MESA-VIRTIO: debug: vn_ring_submit abort on fatal`
+- All preceding operations succeed, including `vkBeginCommandBuffer`
+- vkcube successfully uses render passes, so Venus supports them
+- **Root cause**: Render pass configuration incompatible with Venus/LINEAR images
 
 ## Root Cause Analysis
 
@@ -98,24 +113,23 @@ The Venus error suggests one of:
    - Need to rebuild virglrenderer?
    - Configuration drift?
 
-## Next Steps
+## Next Steps (Updated 2026-01-27)
 
-### Immediate Debugging (Priority 1)
-1. **Verify baseline**:
-   ```bash
-   cd /root && ./test_tri  # Does working demo still work?
-   cd /root && ./vkcube    # Does animated demo still work?
-   ```
+### Immediate Fix (Priority 1) - Render Pass Issue
+1. **Compare render pass configuration with vkcube**:
+   - vkcube uses 2 attachments (color + depth), we use 1
+   - vkcube uses COUNTER_CLOCKWISE, we use CLOCKWISE front face
+   - Check attachment layouts and load/store ops
 
-2. **Compare Vulkan setup**:
-   - Diff `shadertoy_drm.c` vs `test_tri.c` initialization
-   - Check for missing/extra extensions
-   - Verify memory type selection
+2. **Try vkcube's render pass configuration**:
+   - Copy exact render pass setup from vkcube
+   - Add depth buffer if needed
+   - Match attachment descriptions exactly
 
-3. **Simplify to minimal test**:
-   - Strip down to just clear color (no shaders)
-   - Single buffer (remove double buffering)
-   - Remove uniform buffer
+3. **Alternative: Skip render pass entirely**:
+   - test_tri.c doesn't use render pass and works
+   - Try direct image clear + compute shader approach
+   - Or use vkCmdClearColorImage instead of render pass
 
 ### Implementation Fixes (Priority 2)
 1. **Add debug output**:
