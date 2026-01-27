@@ -112,29 +112,65 @@ Instead of separate render server, link virglrenderer into QEMU:
 - Major architectural change
 - Loses process isolation entirely
 
-## Recommended Path Forward
+## Solution ✅ RESOLVED
 
-**Implement Option 1**: Patch virglrenderer to disable worker processes on macOS.
+**Used thread-based workers with threads_compat.h** - This was already implemented on January 20, but accidentally reverted on January 27.
 
-### Implementation Steps
+### What Happened
 
-1. Modify `server/render_worker.c` to detect macOS:
-   ```c
-   #ifdef __APPLE__
-   // Run render context directly in main process
-   render_context_main(context_data);
-   #else
-   // Fork worker as normal
-   fork_worker(...);
-   #endif
-   ```
+1. **Jan 20, 2026**: Commit `5c4f255a` added full macOS compatibility:
+   - Created `threads_compat.h` (pthread wrapper for C11 threads API)
+   - Modified `render_worker.c` to use threads on macOS
+   - Implemented pipe-based SIGCHLD handling (macOS lacks signalfd)
+   - **This was working perfectly!**
 
-2. Test with same workload
+2. **Jan 27, 2026**: Commit `baf75ab` reverted a "codex wip" change
+   - **Accidentally removed the `#ifdef __APPLE__` threads_compat.h include**
+   - Broke thread-based worker support on macOS
+   - Caused the XPC/fork issue to appear
 
-3. If successful, submit patch upstream with explanation
+3. **Jan 27, 2026 (later)**: Discovered the accidental revert via git archaeology
+   - Restored the original working code from commit `5c4f255a`
+   - Rebuilt with `-Drender-server-worker=thread`
+   - **Everything works again!**
 
-### Alternative: In-process rendering
-If worker patch is too complex, use virglrenderer as a library linked directly into QEMU (no separate render server).
+### Implementation (Restored from Jan 20 commit)
+
+**File: `server/render_worker.c`**
+```c
+#ifdef ENABLE_RENDER_SERVER_WORKER_THREAD
+#ifdef __APPLE__
+#include "threads_compat.h"  // ← Key fix
+#else
+#include <threads.h>
+#endif
+#endif
+```
+
+**File: `server/threads_compat.h`** (pthread-based C11 threads shim)
+```c
+typedef pthread_t thrd_t;
+typedef int (*thrd_start_t)(void *);
+// ... implements thrd_create, thrd_join, etc using pthreads
+```
+
+**Build configuration:**
+```bash
+cd /opt/other/virglrenderer
+meson configure build -Drender-server-worker=thread
+meson compile -C build && meson install -C build
+```
+
+### Test Results
+
+✅ **Pipeline creation**: SUCCESS (ret=0, valid handle `0x100f7f5b0`)
+✅ **Triangle demo**: RENDERS CORRECTLY
+✅ **Fence timeouts**: RESOLVED
+✅ **Metal compiler access**: FUNCTIONAL (threads preserve XPC connections)
+
+### Lesson Learned
+
+The macOS compatibility was already solved! The XPC/fork issue only appeared after accidentally reverting the fix. Git history search (`git log -p -S"threads.h"`) was essential for discovering this.
 
 ## References
 
