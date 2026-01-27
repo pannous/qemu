@@ -59,18 +59,23 @@ int main(int argc, char *argv[]) {
     const char *frag_path = argv[2];
     float duration = (argc > 3) ? atof(argv[3]) : 30.0f;
 
-    printf("ShaderToy Viewer - DRM\n");
-    printf("Vertex: %s\n", vert_path);
-    printf("Fragment: %s\n", frag_path);
-    printf("Duration: %.1fs\n\n", duration);
+    printf("ShaderToy Viewer - DRM\n"); fflush(stdout);
+    printf("Vertex: %s\n", vert_path); fflush(stdout);
+    printf("Fragment: %s\n", frag_path); fflush(stdout);
+    printf("Duration: %.1fs\n", duration); fflush(stdout);
 
     // === DRM/GBM Setup ===
+    printf("Opening DRM device...\n"); fflush(stdout);
     int drm_fd = open("/dev/dri/card0", O_RDWR);
     if (drm_fd < 0) { perror("/dev/dri/card0"); return 1; }
+    printf("✓ DRM fd=%d\n", drm_fd); fflush(stdout);
 
+    printf("Getting DRM resources...\n"); fflush(stdout);
     drmSetMaster(drm_fd);
     drmModeRes *res = drmModeGetResources(drm_fd);
+    printf("✓ Got resources\n"); fflush(stdout);
 
+    printf("Finding display...\n"); fflush(stdout);
     drmModeConnector *conn = NULL;
     for (int i = 0; i < res->count_connectors; i++) {
         conn = drmModeGetConnector(drm_fd, res->connectors[i]);
@@ -82,7 +87,7 @@ int main(int argc, char *argv[]) {
 
     drmModeModeInfo *mode = &conn->modes[0];
     uint32_t W = mode->hdisplay, H = mode->vdisplay;
-    printf("Display: %ux%u\n", W, H);
+    printf("Display: %ux%u\n", W, H); fflush(stdout);
 
     drmModeEncoder *enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
     uint32_t crtc_id = enc ? enc->crtc_id : res->crtcs[0];
@@ -102,24 +107,38 @@ int main(int argc, char *argv[]) {
         drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id[i], 0);
     }
 
-    // === Vulkan Setup ===
+    // === Vulkan Setup (with external memory extensions like test_tri.c) ===
+    printf("\nCreating Vulkan instance...\n"); fflush(stdout);
+    const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
     VkInstanceCreateInfo inst_info = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .enabledExtensionCount = 1,
+        .ppEnabledExtensionNames = inst_exts
     };
     VkInstance instance;
     VK_CHECK(vkCreateInstance(&inst_info, NULL, &instance));
+    printf("✓ Instance created\n"); fflush(stdout);
 
+    printf("Enumerating devices...\n"); fflush(stdout);
     uint32_t gpuCount = 1;
     VkPhysicalDevice gpu;
     vkEnumeratePhysicalDevices(instance, &gpuCount, &gpu);
+    printf("✓ Found %u device(s)\n", gpuCount); fflush(stdout);
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(gpu, &props);
-    printf("GPU: %s\n", props.deviceName);
+    printf("GPU: %s\n", props.deviceName); fflush(stdout);
 
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
+    // Device with external memory extensions (needed for Venus)
+    printf("Creating device...\n"); fflush(stdout);
+    const char *dev_exts[] = {
+        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
+    };
     float qp = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -129,15 +148,20 @@ int main(int argc, char *argv[]) {
     VkDeviceCreateInfo dev_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queue_info
+        .pQueueCreateInfos = &queue_info,
+        .enabledExtensionCount = 3,
+        .ppEnabledExtensionNames = dev_exts
     };
     VkDevice device;
     VK_CHECK(vkCreateDevice(gpu, &dev_info, NULL, &device));
+    printf("✓ Device created\n"); fflush(stdout);
 
     VkQueue queue;
     vkGetDeviceQueue(device, 0, 0, &queue);
+    printf("✓ Got queue\n"); fflush(stdout);
 
     // Render target - LINEAR + HOST_VISIBLE
+    printf("Creating render target image %ux%u...\n", W, H); fflush(stdout);
     VkImageCreateInfo img_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
@@ -149,11 +173,21 @@ int main(int argc, char *argv[]) {
         .tiling = VK_IMAGE_TILING_LINEAR,
         .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
     };
+    printf("  Calling vkCreateImage...\n"); fflush(stdout);
     VkImage rtImg;
-    VK_CHECK(vkCreateImage(device, &img_info, NULL, &rtImg));
+    VkResult img_res = vkCreateImage(device, &img_info, NULL, &rtImg);
+    if (img_res != VK_SUCCESS) {
+        printf("ERROR: vkCreateImage failed with %d\n", img_res);
+        return 1;
+    }
+    printf("✓ Image created\n"); fflush(stdout);
 
+    printf("Getting memory requirements...\n"); fflush(stdout);
     VkMemoryRequirements rtReq;
     vkGetImageMemoryRequirements(device, rtImg, &rtReq);
+    printf("  Memory size: %llu bytes, alignment: %llu\n",
+           (unsigned long long)rtReq.size,
+           (unsigned long long)rtReq.alignment); fflush(stdout);
 
     VkMemoryAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
@@ -163,10 +197,14 @@ int main(int argc, char *argv[]) {
     };
     VkDeviceMemory rtMem;
     VK_CHECK(vkAllocateMemory(device, &alloc_info, NULL, &rtMem));
+    printf("✓ Memory allocated\n"); fflush(stdout);
+
     VK_CHECK(vkBindImageMemory(device, rtImg, rtMem, 0));
+    printf("✓ Memory bound\n"); fflush(stdout);
 
     void *rtPtr;
     VK_CHECK(vkMapMemory(device, rtMem, 0, VK_WHOLE_SIZE, 0, &rtPtr));
+    printf("✓ Memory mapped\n"); fflush(stdout);
 
     VkImageViewCreateInfo view_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
