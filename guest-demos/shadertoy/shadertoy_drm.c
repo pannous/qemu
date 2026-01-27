@@ -150,21 +150,6 @@ int main(int argc, char *argv[]) {
     vkGetDeviceQueue(device, 0, 0, &queue);
     printf("✓ Got queue\n"); fflush(stdout);
 
-    // TEST: Try creating descriptor pool early to see if it works
-    printf("TEST: Creating descriptor pool early...\n"); fflush(stdout);
-    VkDescriptorPool testPool;
-    VkResult testResult = vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes = &(VkDescriptorPoolSize){VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
-    }, NULL, &testPool);
-    if (testResult == VK_SUCCESS) {
-        printf("✓ TEST descriptor pool created successfully!\n"); fflush(stdout);
-        vkDestroyDescriptorPool(device, testPool, NULL);
-    } else {
-        printf("✗ TEST descriptor pool failed with error %d\n", testResult); fflush(stdout);
-    }
 
     // Render target - LINEAR + HOST_VISIBLE
     printf("Creating render target image %ux%u...\n", W, H); fflush(stdout);
@@ -444,8 +429,7 @@ int main(int argc, char *argv[]) {
     // Command pool/buffer
     printf("Creating command pool...\n"); fflush(stdout);
     VkCommandPoolCreateInfo cmdPool_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
     };
     VkCommandPool cmdPool;
     VK_CHECK(vkCreateCommandPool(device, &cmdPool_info, NULL, &cmdPool));
@@ -517,12 +501,12 @@ int main(int argc, char *argv[]) {
         // Record
         printf("  Beginning command buffer...\n"); fflush(stdout);
         VkCommandBufferBeginInfo begin = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         };
         vkBeginCommandBuffer(cmd, &begin);
         printf("  Command buffer begun\n"); fflush(stdout);
 
+        printf("  Starting render pass...\n"); fflush(stdout);
         VkClearValue clear = { .color = { {0.0f, 0.0f, 0.0f, 1.0f} } };
         VkRenderPassBeginInfo rp_begin = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -532,23 +516,48 @@ int main(int argc, char *argv[]) {
             .clearValueCount = 1,
             .pClearValues = &clear
         };
+        printf("  Calling vkCmdBeginRenderPass...\n"); fflush(stdout);
         vkCmdBeginRenderPass(cmd, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+        printf("  Render pass begun!\n"); fflush(stdout);
+
+        printf("  Binding pipeline...\n"); fflush(stdout);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipelineLayout, 0, 1, &descSet, 0, NULL);
-        vkCmdDraw(cmd, 6, 1, 0, 0);
+        printf("  Pipeline bound!\n"); fflush(stdout);
+
+        printf("  SKIP: Binding descriptor sets (testing)...\n"); fflush(stdout);
+        //vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        //    pipelineLayout, 0, 1, &descSet, 0, NULL);
+        //printf("  Descriptor sets bound!\n"); fflush(stdout);
+
+        printf("  Drawing (3 vertices like test_tri)...\n"); fflush(stdout);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        printf("  Draw complete!\n"); fflush(stdout);
+
+        printf("  Ending render pass...\n"); fflush(stdout);
         vkCmdEndRenderPass(cmd);
+        printf("  Render pass ended!\n"); fflush(stdout);
+
+        printf("  Ending command buffer...\n"); fflush(stdout);
         vkEndCommandBuffer(cmd);
+        printf("  Command buffer ended!\n"); fflush(stdout);
 
         // Submit
+        printf("  Submitting to queue...\n"); fflush(stdout);
         VkSubmitInfo submit = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
             .pCommandBuffers = &cmd
         };
         VK_CHECK(vkQueueSubmit(queue, 1, &submit, fence));
+        printf("  Submitted!\n"); fflush(stdout);
+
+        printf("  Waiting for fence...\n"); fflush(stdout);
         VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+        printf("  Fence signaled!\n"); fflush(stdout);
+
+        printf("  Resetting fence...\n"); fflush(stdout);
         vkResetFences(device, 1, &fence);
+        printf("  Fence reset!\n"); fflush(stdout);
 
         // Copy to GBM
         void *gbmPtr = NULL;
