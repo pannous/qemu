@@ -1810,19 +1810,19 @@ static int hvf_wfi(CPUState *cpu)
                     idle_start_time = now;
                 }
 
-                /* Only sleep if we've been idle for 1+ second (prevents rendering stutter) */
+                /* Only sleep if we've been idle for 5+ seconds (prevents keyboard lag) */
                 int64_t idle_duration_ns = now - idle_start_time;
 
-                if (idle_duration_ns > 1000000000) {  /* 1 second in ns */
+                if (idle_duration_ns > 5000000000) {  /* 5 seconds in ns */
                     /* Adaptive sleep based on how long we've been idle */
                     int sleep_us;
-                    if (idle_duration_ns < 2000000000) {  /* 1-2 seconds idle */
+                    if (idle_duration_ns < 10000000000) {  /* 5-10 seconds idle */
                         sleep_us = max_sleep_us / 10;  /* 10% of max */
-                    } else if (idle_duration_ns < 5000000000) {  /* 2-5 seconds idle */
+                    } else if (idle_duration_ns < 20000000000) {  /* 10-20 seconds idle */
                         sleep_us = max_sleep_us / 4;   /* 25% of max */
-                    } else if (idle_duration_ns < 10000000000) {  /* 5-10 seconds idle */
+                    } else if (idle_duration_ns < 30000000000) {  /* 20-30 seconds idle */
                         sleep_us = max_sleep_us / 2;   /* 50% of max */
-                    } else {  /* 10+ seconds idle */
+                    } else {  /* 30+ seconds idle */
                         sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
                     }
 
