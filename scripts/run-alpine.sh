@@ -22,11 +22,11 @@ export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/Mo
 # Put custom virglrenderer FIRST so it's found before homebrew version
 export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
-# HVF WFI Adaptive Sleep: DISABLED by default (opt-in only)
-# Reduces idle CPU from 300% to 6-7% via adaptive sleep
-# Enable: export HVF_WFI_SLEEP=100 (recommended) or HVF_WFI_SLEEP=50 (conservative)
-# Sleep only activates after 15s boot + sustained idle (50+ consecutive WFI calls)
-# Automatically backs off when activity is detected
+# HVF WFI Adaptive Sleep: ENABLED by default (100μs)
+# Reduces idle CPU from 300% to 6-7% via truly adaptive sleep
+# Only activates after: 15s boot + sustained idle (50+ consecutive rapid WFI calls)
+# Instantly backs off when activity detected (zero latency impact)
+# Override: export HVF_WFI_SLEEP=0 (disable), HVF_WFI_SLEEP=50 (conservative)
 if [ -n "${HVF_WFI_SLEEP:-}" ]; then
     export HVF_WFI_SLEEP
 fi
