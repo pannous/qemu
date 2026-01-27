@@ -1735,11 +1735,11 @@ static int hvf_wfi(CPUState *cpu)
 
     if (cpu_has_work(cpu)) {
         /* Decrease counter on work - tears down MUCH faster than idle builds up */
-        idle_counter -= 100;  /* Aggressive work penalty: exits sleep in ~2 WFI cycles */
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        idle_counter -= 100;  /* Aggressive work penalty: exits sleep in ~5 work detections */
 
         /* Fully reset idle state when counter goes negative (sustained work detected) */
         if (idle_counter <= 0) {
-            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             idle_counter = 0;
             idle_start_time = 0;
             last_reset_time = now;
@@ -1749,6 +1749,11 @@ static int hvf_wfi(CPUState *cpu)
 
     /* No work - increase counter slowly (builds positive) */
     idle_counter++;
+
+    /* Cap counter at reasonable maximum (prevents runaway growth) */
+    if (idle_counter > 500) {
+        idle_counter = 500;
+    }
 
     /* One-time initialization: read env var and start timer */
     if (!init_done) {
