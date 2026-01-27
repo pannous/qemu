@@ -1734,8 +1734,8 @@ static int hvf_wfi(CPUState *cpu)
     static int64_t idle_start_time = 0;  /* When sustained idle began */
 
     if (cpu_has_work(cpu)) {
-        /* Decrease counter on work - builds up negatively for sustained activity */
-        idle_counter -= 20;  /* Work penalty: decreases counter faster than idle builds it */
+        /* Decrease counter on work - tears down MUCH faster than idle builds up */
+        idle_counter -= 100;  /* Aggressive work penalty: exits sleep in ~2 WFI cycles */
 
         /* Fully reset idle state when counter goes negative (sustained work detected) */
         if (idle_counter <= 0) {
@@ -1747,7 +1747,7 @@ static int hvf_wfi(CPUState *cpu)
         return 0;
     }
 
-    /* No work - increase counter (builds positive) */
+    /* No work - increase counter slowly (builds positive) */
     idle_counter++;
 
     /* One-time initialization: read env var and start timer */
@@ -1788,8 +1788,8 @@ static int hvf_wfi(CPUState *cpu)
             if (last_wfi_time > 0 && (now - last_wfi_time) < 2000000) {  /* 2ms in ns */
                 /* Continue building idle counter (already incremented above) */
             } else {
-                /* Large gap - decrease counter but don't fully reset unless sustained gaps */
-                idle_counter -= 50;  /* Gap penalty */
+                /* Large gap - decrease counter aggressively */
+                idle_counter -= 150;  /* Aggressive gap penalty: rapid exit from sleep */
                 if (idle_counter <= 0) {
                     idle_counter = 0;
                     idle_start_time = 0;
