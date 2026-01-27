@@ -1732,16 +1732,27 @@ static int hvf_wfi(CPUState *cpu)
     static int64_t last_wfi_time = 0;
     static int64_t last_reset_time = 0;
     static int64_t idle_start_time = 0;  /* When sustained idle began */
+    static int consecutive_work = 0;  /* Grace period for brief work bursts */
 
     if (cpu_has_work(cpu)) {
-        /* Reset idle counter when there's work */
-        if (consecutive_idles > 0) {
-            consecutive_idles = 0;
-            idle_start_time = 0;
-            last_reset_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        /* Allow brief work without breaking idle - only reset after sustained work */
+        consecutive_work++;
+
+        /* Reset idle only after 10+ consecutive work detections (grace period for timer ticks) */
+        if (consecutive_work > 10) {
+            if (consecutive_idles > 0) {
+                int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                consecutive_idles = 0;
+                idle_start_time = 0;
+                last_reset_time = now;
+            }
+            consecutive_work = 0;  /* Reset work counter after processing */
         }
         return 0;
     }
+
+    /* No work - reset work counter, preserve idle state */
+    consecutive_work = 0;
 
     /* One-time initialization: read env var and start timer */
     if (!init_done) {
@@ -1777,8 +1788,8 @@ static int hvf_wfi(CPUState *cpu)
                 return EXCP_HLT;
             }
 
-            /* Check if WFIs are happening rapidly (less than 1ms apart) */
-            if (last_wfi_time > 0 && (now - last_wfi_time) < 1000000) {  /* 1ms in ns */
+            /* Check if WFIs are happening rapidly (less than 2ms apart - allows 1ms timer ticks) */
+            if (last_wfi_time > 0 && (now - last_wfi_time) < 2000000) {  /* 2ms in ns */
                 consecutive_idles++;
             } else {
                 /* Large gap or first call - reset counter */
@@ -1799,6 +1810,7 @@ static int hvf_wfi(CPUState *cpu)
 
                 /* Only sleep if we've been idle for 1+ second (prevents rendering stutter) */
                 int64_t idle_duration_ns = now - idle_start_time;
+
                 if (idle_duration_ns > 1000000000) {  /* 1 second in ns */
                     /* Adaptive sleep based on how long we've been idle */
                     int sleep_us;
