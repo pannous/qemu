@@ -1731,18 +1731,12 @@ static int hvf_wfi(CPUState *cpu)
     static int consecutive_idles = 0;
     static int64_t last_wfi_time = 0;
     static int64_t last_reset_time = 0;
-    static bool sleep_activated = false;
 
     if (cpu_has_work(cpu)) {
         /* Reset idle counter when there's work */
         if (consecutive_idles > 0) {
             consecutive_idles = 0;
             last_reset_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-            if (sleep_activated) {
-                fprintf(stderr, "HVF: WFI sleep DEACTIVATED (activity detected)\n");
-                fflush(stderr);
-                sleep_activated = false;
-            }
         }
         return 0;
     }
@@ -1787,12 +1781,6 @@ static int hvf_wfi(CPUState *cpu)
             } else {
                 /* Large gap or first call - reset counter */
                 if (consecutive_idles > 0) {
-                    if (sleep_activated) {
-                        fprintf(stderr, "HVF: WFI sleep DEACTIVATED (gap detected: %lld μs)\n",
-                                (now - last_wfi_time) / 1000);
-                        fflush(stderr);
-                        sleep_activated = false;
-                    }
                     consecutive_idles = 0;
                     last_reset_time = now;
                 }
@@ -1813,12 +1801,6 @@ static int hvf_wfi(CPUState *cpu)
                     sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
                 }
 
-                if (!sleep_activated) {
-                    fprintf(stderr, "HVF: WFI sleep ACTIVATED (deep idle: %d consecutive, %d μs sleep)\n",
-                            consecutive_idles, sleep_us);
-                    fflush(stderr);
-                    sleep_activated = true;
-                }
                 g_usleep(sleep_us);
             }
         }
