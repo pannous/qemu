@@ -20,3 +20,7 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+
+# Alpine ISO and boot files
+alpine-virt-*.iso
+alpine-boot/

@@ -11,6 +11,7 @@ QEMU_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Paths
 QEMU="${QEMU_DIR}/build/qemu-system-aarch64"
+ISO="${QEMU_DIR}/alpine-virt-3.21.0-aarch64.iso"
 DISK_BACKING="${QEMU_DIR}/alpine-venus.img"
 DISK="${QEMU_DIR}/alpine-overlay.qcow2"
 
@@ -28,8 +29,8 @@ export VK_ICD_FILENAMES=/opt/homebrew/Cellar/molten-vk/1.4.0/etc/vulkan/icd.d/Mo
 # Put custom virglrenderer FIRST so it's found before homebrew version
 export DYLD_LIBRARY_PATH=/opt/other/virglrenderer/install/lib:/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}
 
-# Use custom virglrenderer render_server from builddir (not installed)
-export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/builddir/server/virgl_render_server
+# Use custom virglrenderer render_server from build (not installed)
+export RENDER_SERVER_EXEC_PATH=/opt/other/virglrenderer/build/server/virgl_render_server
 
 # Venus/virgl debug (uncomment for troubleshooting)
 export VKR_DEBUG=all
