@@ -4425,7 +4425,8 @@ foreach target : target_dirs
       emulators += {exe['name'] : custom_target(exe['name'],
                    input: build_input,
                    output: exe['name'],
-                   command: [entitlement, '@OUTPUT@', '@INPUT@'])
+                   command: [entitlement, '@OUTPUT@', '@INPUT@'],
+                   build_by_default: true)
       }
 
       meson.add_install_script(entitlement, '--install',
