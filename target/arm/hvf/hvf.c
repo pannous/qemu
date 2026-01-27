@@ -1731,11 +1731,13 @@ static int hvf_wfi(CPUState *cpu)
     static int consecutive_idles = 0;
     static int64_t last_wfi_time = 0;
     static int64_t last_reset_time = 0;
+    static int64_t idle_start_time = 0;  /* When sustained idle began */
 
     if (cpu_has_work(cpu)) {
         /* Reset idle counter when there's work */
         if (consecutive_idles > 0) {
             consecutive_idles = 0;
+            idle_start_time = 0;
             last_reset_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         }
         return 0;
@@ -1782,26 +1784,36 @@ static int hvf_wfi(CPUState *cpu)
                 /* Large gap or first call - reset counter */
                 if (consecutive_idles > 0) {
                     consecutive_idles = 0;
+                    idle_start_time = 0;
                     last_reset_time = now;
                 }
             }
             last_wfi_time = now;
 
-            /* Only sleep after 200+ consecutive rapid WFIs (sustained idle) */
+            /* Only sleep after sustained idle for 1+ second */
             if (consecutive_idles > 200) {
-                /* Adaptive sleep: start small, ramp up to max */
-                int sleep_us;
-                if (consecutive_idles < 500) {
-                    sleep_us = max_sleep_us / 10;  /* 10% of max */
-                } else if (consecutive_idles < 1000) {
-                    sleep_us = max_sleep_us / 4;   /* 25% of max */
-                } else if (consecutive_idles < 2000) {
-                    sleep_us = max_sleep_us / 2;   /* 50% of max */
-                } else {
-                    sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
+                /* Mark when we first reached idle threshold */
+                if (idle_start_time == 0) {
+                    idle_start_time = now;
                 }
 
-                g_usleep(sleep_us);
+                /* Only sleep if we've been idle for 1+ second (prevents rendering stutter) */
+                int64_t idle_duration_ns = now - idle_start_time;
+                if (idle_duration_ns > 1000000000) {  /* 1 second in ns */
+                    /* Adaptive sleep based on how long we've been idle */
+                    int sleep_us;
+                    if (idle_duration_ns < 2000000000) {  /* 1-2 seconds idle */
+                        sleep_us = max_sleep_us / 10;  /* 10% of max */
+                    } else if (idle_duration_ns < 5000000000) {  /* 2-5 seconds idle */
+                        sleep_us = max_sleep_us / 4;   /* 25% of max */
+                    } else if (idle_duration_ns < 10000000000) {  /* 5-10 seconds idle */
+                        sleep_us = max_sleep_us / 2;   /* 50% of max */
+                    } else {  /* 10+ seconds idle */
+                        sleep_us = max_sleep_us;       /* Full sleep when deeply idle */
+                    }
+
+                    g_usleep(sleep_us);
+                }
             }
         }
     }
