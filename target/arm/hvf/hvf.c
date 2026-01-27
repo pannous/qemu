@@ -1746,14 +1746,14 @@ static int hvf_wfi(CPUState *cpu)
         if (sleep_env) {
             max_sleep_us = atoi(sleep_env);
         } else {
-            /* Default: disabled (safe, opt-in only) */
-            max_sleep_us = 0;
+            /* Default: 100μs adaptive sleep (safe with v2 sustained idle detection) */
+            max_sleep_us = 100;
         }
 
         if (max_sleep_us > 0) {
-            fprintf(stderr, "HVF: WFI adaptive sleep: max %d μs (activates after 15s, requires sustained idle)\n", max_sleep_us);
+            fprintf(stderr, "HVF: WFI adaptive sleep: max %d μs (activates after 15s + sustained idle)\n", max_sleep_us);
         } else {
-            fprintf(stderr, "HVF: WFI sleep disabled (set HVF_WFI_SLEEP=100 to enable)\n");
+            fprintf(stderr, "HVF: WFI sleep disabled (HVF_WFI_SLEEP=0)\n");
         }
         fflush(stderr);
     }
