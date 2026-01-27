@@ -1728,31 +1728,27 @@ static int hvf_wfi(CPUState *cpu)
     static int64_t vm_start_time = 0;
     static int max_sleep_us = -1;  /* -1 = not initialized, 0 = disabled, >0 = max microseconds */
     static bool init_done = false;
-    static int consecutive_idles = 0;
+    static int idle_counter = 0;  /* Bidirectional: builds up positive (idle) or negative (work) */
     static int64_t last_wfi_time = 0;
     static int64_t last_reset_time = 0;
     static int64_t idle_start_time = 0;  /* When sustained idle began */
-    static int consecutive_work = 0;  /* Grace period for brief work bursts */
 
     if (cpu_has_work(cpu)) {
-        /* Allow brief work without breaking idle - only reset after sustained work */
-        consecutive_work++;
+        /* Decrease counter on work - builds up negatively for sustained activity */
+        idle_counter -= 20;  /* Work penalty: decreases counter faster than idle builds it */
 
-        /* Reset idle only after 10+ consecutive work detections (grace period for timer ticks) */
-        if (consecutive_work > 10) {
-            if (consecutive_idles > 0) {
-                int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-                consecutive_idles = 0;
-                idle_start_time = 0;
-                last_reset_time = now;
-            }
-            consecutive_work = 0;  /* Reset work counter after processing */
+        /* Fully reset idle state when counter goes negative (sustained work detected) */
+        if (idle_counter <= 0) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            idle_counter = 0;
+            idle_start_time = 0;
+            last_reset_time = now;
         }
         return 0;
     }
 
-    /* No work - reset work counter, preserve idle state */
-    consecutive_work = 0;
+    /* No work - increase counter (builds positive) */
+    idle_counter++;
 
     /* One-time initialization: read env var and start timer */
     if (!init_done) {
@@ -1783,26 +1779,27 @@ static int hvf_wfi(CPUState *cpu)
 
             /* After activity reset, require cooldown period before counting again */
             if (last_reset_time > 0 && (now - last_reset_time) < 100000000) {  /* 100ms cooldown */
-                consecutive_idles = 0;
+                idle_counter = 0;
                 last_wfi_time = now;
                 return EXCP_HLT;
             }
 
             /* Check if WFIs are happening rapidly (less than 2ms apart - allows 1ms timer ticks) */
             if (last_wfi_time > 0 && (now - last_wfi_time) < 2000000) {  /* 2ms in ns */
-                consecutive_idles++;
+                /* Continue building idle counter (already incremented above) */
             } else {
-                /* Large gap or first call - reset counter */
-                if (consecutive_idles > 0) {
-                    consecutive_idles = 0;
+                /* Large gap - decrease counter but don't fully reset unless sustained gaps */
+                idle_counter -= 50;  /* Gap penalty */
+                if (idle_counter <= 0) {
+                    idle_counter = 0;
                     idle_start_time = 0;
                     last_reset_time = now;
                 }
             }
             last_wfi_time = now;
 
-            /* Only sleep after sustained idle for 1+ second */
-            if (consecutive_idles > 200) {
+            /* Only sleep after idle counter reaches threshold and sustained for 1+ second */
+            if (idle_counter > 200) {
                 /* Mark when we first reached idle threshold */
                 if (idle_start_time == 0) {
                     idle_start_time = now;
