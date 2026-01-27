@@ -107,10 +107,13 @@ int main(int argc, char *argv[]) {
         drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id[i], 0);
     }
 
-    // === Vulkan Setup (no extensions like vkcube) ===
+    // === Vulkan Setup (with external memory extensions like test_tri) ===
     printf("\nCreating Vulkan instance...\n"); fflush(stdout);
+    const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
     VkInstanceCreateInfo inst_info = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .enabledExtensionCount = 1,
+        .ppEnabledExtensionNames = inst_exts
     };
     VkInstance instance;
     VK_CHECK(vkCreateInstance(&inst_info, NULL, &instance));
@@ -129,8 +132,13 @@ int main(int argc, char *argv[]) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
-    // Device (no extensions like vkcube)
+    // Device (with external memory extensions like test_tri)
     printf("Creating device...\n"); fflush(stdout);
+    const char *dev_exts[] = {
+        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
+    };
     float qp = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -140,7 +148,9 @@ int main(int argc, char *argv[]) {
     VkDeviceCreateInfo dev_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queue_info
+        .pQueueCreateInfos = &queue_info,
+        .enabledExtensionCount = 3,
+        .ppEnabledExtensionNames = dev_exts
     };
     VkDevice device;
     VK_CHECK(vkCreateDevice(gpu, &dev_info, NULL, &device));
@@ -326,11 +336,9 @@ int main(int argc, char *argv[]) {
     VK_CHECK(vkCreateDescriptorSetLayout(device, &descLayout_info, NULL, &descLayout));
     printf("✓ Descriptor set layout created\n"); fflush(stdout);
 
-    printf("Creating pipeline layout...\n"); fflush(stdout);
+    printf("Creating pipeline layout (empty like test_tri)...\n"); fflush(stdout);
     VkPipelineLayoutCreateInfo pipelineLayout_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &descLayout
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
     };
     VkPipelineLayout pipelineLayout;
     VK_CHECK(vkCreatePipelineLayout(device, &pipelineLayout_info, NULL, &pipelineLayout));
@@ -361,8 +369,7 @@ int main(int argc, char *argv[]) {
     VkPipelineRasterizationStateCreateInfo rs = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_BACK_BIT,
-        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .cullMode = VK_CULL_MODE_NONE,  // Like test_tri
         .lineWidth = 1.0f
     };
     VkPipelineMultisampleStateCreateInfo ms = {
@@ -477,15 +484,10 @@ int main(int argc, char *argv[]) {
 
     const long target_frame_ns = 16666666; // 60 FPS
 
-    // === Render Loop ===
-    printf("Entering render loop...\n"); fflush(stdout);
-    while (1) {
-        printf("  Frame start...\n"); fflush(stdout);
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        float t = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9f;
-
-        if (t >= duration) break;
+    // === Render ONCE (like test_tri) ===
+    printf("Rendering single frame...\n"); fflush(stdout);
+    {
+        float t = 0.0f;
 
         printf("  Updating uniforms (t=%.2f)...\n", t); fflush(stdout);
         // Update uniforms
@@ -524,10 +526,7 @@ int main(int argc, char *argv[]) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         printf("  Pipeline bound!\n"); fflush(stdout);
 
-        printf("  SKIP: Binding descriptor sets (testing)...\n"); fflush(stdout);
-        //vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        //    pipelineLayout, 0, 1, &descSet, 0, NULL);
-        //printf("  Descriptor sets bound!\n"); fflush(stdout);
+        // Don't bind descriptor sets (not in pipeline layout)
 
         printf("  Drawing (3 vertices like test_tri)...\n"); fflush(stdout);
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -578,40 +577,10 @@ int main(int argc, char *argv[]) {
         drmModeSetCrtc(drm_fd, crtc_id, fb_id[current_buffer], 0, 0,
             &conn->connector_id, 1, mode);
 
-        current_buffer = 1 - current_buffer;
-        frames++;
-        frames_since_report++;
-
-        // FPS reporting
-        float time_since_report = (now.tv_sec - last_report.tv_sec) +
-                                  (now.tv_nsec - last_report.tv_nsec) / 1e9f;
-        if (time_since_report >= 1.0f) {
-            float fps = frames_since_report / time_since_report;
-            printf("\rFrame %d: %.1f FPS | Time: %.1fs / %.1fs",
-                frames, fps, t, duration);
-            fflush(stdout);
-            frames_since_report = 0;
-            last_report = now;
-        }
-
-        // Frame limiting
-        struct timespec frame_end;
-        clock_gettime(CLOCK_MONOTONIC, &frame_end);
-        long frame_time_ns = (frame_end.tv_sec - now.tv_sec) * 1000000000L +
-                            (frame_end.tv_nsec - now.tv_nsec);
-        long sleep_ns = target_frame_ns - frame_time_ns;
-        if (sleep_ns > 0) {
-            struct timespec sleep_time = { 0, sleep_ns };
-            nanosleep(&sleep_time, NULL);
-        }
+        printf("Frame rendered!\n"); fflush(stdout);
     }
 
-    struct timespec end;
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    float total_time = (end.tv_sec - start.tv_sec) +
-                       (end.tv_nsec - start.tv_nsec) / 1e9f;
-    printf("\n\n✓ Done! %d frames in %.2fs (%.1f fps avg)\n",
-           frames, total_time, frames / total_time);
+    printf("\n✓ Done!\n");
 
     // Cleanup
     vkUnmapMemory(device, rtMem);
