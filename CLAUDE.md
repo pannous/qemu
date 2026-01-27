@@ -9,6 +9,9 @@ and later
 
 All custom forks to get Vulkan rendering working on the Mac. 
 
+rebuild qemu via
+/opt/other/qemu/rebuild-qemu.sh
+
 Already upstream
 	•	virtio-gpu Venus backend
 	•	Vulkan command forwarding

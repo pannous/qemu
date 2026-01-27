@@ -9,6 +9,9 @@ and later
 
 All custom forks to get Vulkan rendering working on the Mac. 
 
+rebuild qemu via
+/opt/other/qemu/rebuild-qemu.sh
+
 Already upstream
 	•	virtio-gpu Venus backend
 	•	Vulkan command forwarding
@@ -43,3 +46,6 @@ HVF has 16KB page, FIXED alignment issues with 4KB blob allocations:
 We have a custom kernel with 16k pages alpine-virt-16k.img
 
 Do not kill other QEMU sessions!
+
+rebuild qemu via
+/opt/other/qemu/rebuild-qemu.sh

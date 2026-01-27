@@ -9,22 +9,21 @@ layout(binding = 0) uniform UniformBufferObject {
     vec4 iMouse;
 } ubo;
 
-// Classic tunnel effect
+// Plasma effect
 void main() {
     vec2 uv = fragCoord / ubo.iResolution.xy;
-    uv = uv * 2.0 - 1.0;
-    uv.x *= ubo.iResolution.x / ubo.iResolution.y;
-
     float time = ubo.iTime;
 
-    float r = length(uv);
-    float a = atan(uv.y, uv.x);
+    vec2 p = uv * 8.0;
 
-    float u = 1.0 / r + time * 0.3;
-    float v = a / 3.14159;
+    float value = 0.0;
+    value += sin(p.x + time);
+    value += sin(p.y + time);
+    value += sin(p.x + p.y + time);
+    value += sin(sqrt(p.x * p.x + p.y * p.y) + time);
+    value /= 4.0;
 
-    vec3 col = 0.5 + 0.5 * cos(u * 2.0 + vec3(0, 2, 4));
-    col *= 1.0 - exp(-r * 0.5);
+    vec3 col = 0.5 + 0.5 * cos(value * 3.14159 + vec3(0, 0.5, 1.0));
 
     fragColor = vec4(col, 1.0);
 }
