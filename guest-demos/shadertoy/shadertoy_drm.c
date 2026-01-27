@@ -107,13 +107,10 @@ int main(int argc, char *argv[]) {
         drmModeAddFB2(drm_fd, W, H, GBM_FORMAT_XRGB8888, handles, strides, offsets, &fb_id[i], 0);
     }
 
-    // === Vulkan Setup (with external memory extensions like test_tri.c) ===
+    // === Vulkan Setup (no extensions like vkcube) ===
     printf("\nCreating Vulkan instance...\n"); fflush(stdout);
-    const char *inst_exts[] = { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME };
     VkInstanceCreateInfo inst_info = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .enabledExtensionCount = 1,
-        .ppEnabledExtensionNames = inst_exts
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     };
     VkInstance instance;
     VK_CHECK(vkCreateInstance(&inst_info, NULL, &instance));
@@ -132,13 +129,8 @@ int main(int argc, char *argv[]) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
-    // Device with external memory extensions (needed for Venus)
+    // Device (no extensions like vkcube)
     printf("Creating device...\n"); fflush(stdout);
-    const char *dev_exts[] = {
-        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
-    };
     float qp = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -148,9 +140,7 @@ int main(int argc, char *argv[]) {
     VkDeviceCreateInfo dev_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queue_info,
-        .enabledExtensionCount = 3,
-        .ppEnabledExtensionNames = dev_exts
+        .pQueueCreateInfos = &queue_info
     };
     VkDevice device;
     VK_CHECK(vkCreateDevice(gpu, &dev_info, NULL, &device));
@@ -159,6 +149,22 @@ int main(int argc, char *argv[]) {
     VkQueue queue;
     vkGetDeviceQueue(device, 0, 0, &queue);
     printf("✓ Got queue\n"); fflush(stdout);
+
+    // TEST: Try creating descriptor pool early to see if it works
+    printf("TEST: Creating descriptor pool early...\n"); fflush(stdout);
+    VkDescriptorPool testPool;
+    VkResult testResult = vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes = &(VkDescriptorPoolSize){VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
+    }, NULL, &testPool);
+    if (testResult == VK_SUCCESS) {
+        printf("✓ TEST descriptor pool created successfully!\n"); fflush(stdout);
+        vkDestroyDescriptorPool(device, testPool, NULL);
+    } else {
+        printf("✗ TEST descriptor pool failed with error %d\n", testResult); fflush(stdout);
+    }
 
     // Render target - LINEAR + HOST_VISIBLE
     printf("Creating render target image %ux%u...\n", W, H); fflush(stdout);
@@ -206,6 +212,7 @@ int main(int argc, char *argv[]) {
     VK_CHECK(vkMapMemory(device, rtMem, 0, VK_WHOLE_SIZE, 0, &rtPtr));
     printf("✓ Memory mapped\n"); fflush(stdout);
 
+    printf("Creating image view...\n"); fflush(stdout);
     VkImageViewCreateInfo view_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = rtImg,
@@ -215,8 +222,10 @@ int main(int argc, char *argv[]) {
     };
     VkImageView rtView;
     VK_CHECK(vkCreateImageView(device, &view_info, NULL, &rtView));
+    printf("✓ Image view created\n"); fflush(stdout);
 
     // Render pass
+    printf("Creating render pass...\n"); fflush(stdout);
     VkAttachmentDescription att = {
         .format = VK_FORMAT_B8G8R8A8_UNORM,
         .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -240,7 +249,9 @@ int main(int argc, char *argv[]) {
     };
     VkRenderPass renderPass;
     VK_CHECK(vkCreateRenderPass(device, &rp_info, NULL, &renderPass));
+    printf("✓ Render pass created\n"); fflush(stdout);
 
+    printf("Creating framebuffer...\n"); fflush(stdout);
     VkFramebufferCreateInfo fb_info = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
         .renderPass = renderPass,
@@ -252,8 +263,10 @@ int main(int argc, char *argv[]) {
     };
     VkFramebuffer framebuffer;
     VK_CHECK(vkCreateFramebuffer(device, &fb_info, NULL, &framebuffer));
+    printf("✓ Framebuffer created\n"); fflush(stdout);
 
     // Load shaders
+    printf("Loading shaders...\n"); fflush(stdout);
     size_t vsz, fsz;
     uint32_t *vc = load_spv(vert_path, &vsz);
     uint32_t *fc = load_spv(frag_path, &fsz);
@@ -272,19 +285,26 @@ int main(int argc, char *argv[]) {
     VkShaderModule vm, fm;
     VK_CHECK(vkCreateShaderModule(device, &vs_info, NULL, &vm));
     VK_CHECK(vkCreateShaderModule(device, &fs_info, NULL, &fm));
+    printf("✓ Shader modules created\n"); fflush(stdout);
 
     // Uniform buffer
+    printf("Creating uniform buffer...\n"); fflush(stdout);
     VkBufferCreateInfo uboBuf_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = sizeof(UniformBufferObject),
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
     };
     VkBuffer uboBuf;
+    printf("  Calling vkCreateBuffer...\n"); fflush(stdout);
     VK_CHECK(vkCreateBuffer(device, &uboBuf_info, NULL, &uboBuf));
+    printf("  ✓ Buffer created\n"); fflush(stdout);
 
+    printf("  Getting buffer memory requirements...\n"); fflush(stdout);
     VkMemoryRequirements uboReq;
     vkGetBufferMemoryRequirements(device, uboBuf, &uboReq);
+    printf("  ✓ Got requirements (size: %llu)\n", (unsigned long long)uboReq.size); fflush(stdout);
 
+    printf("  Allocating buffer memory...\n"); fflush(stdout);
     VkMemoryAllocateInfo uboAlloc = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = uboReq.size,
@@ -293,12 +313,19 @@ int main(int argc, char *argv[]) {
     };
     VkDeviceMemory uboMem;
     VK_CHECK(vkAllocateMemory(device, &uboAlloc, NULL, &uboMem));
-    VK_CHECK(vkBindBufferMemory(device, uboBuf, uboMem, 0));
+    printf("  ✓ Memory allocated\n"); fflush(stdout);
 
+    printf("  Binding buffer memory...\n"); fflush(stdout);
+    VK_CHECK(vkBindBufferMemory(device, uboBuf, uboMem, 0));
+    printf("  ✓ Memory bound\n"); fflush(stdout);
+
+    printf("  Mapping buffer memory...\n"); fflush(stdout);
     void *uboPtr;
     vkMapMemory(device, uboMem, 0, sizeof(UniformBufferObject), 0, &uboPtr);
+    printf("  ✓ Memory mapped\n"); fflush(stdout);
 
     // Descriptor set
+    printf("Creating descriptor set layout...\n"); fflush(stdout);
     VkDescriptorSetLayoutBinding binding = {
         .binding = 0,
         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -312,7 +339,9 @@ int main(int argc, char *argv[]) {
     };
     VkDescriptorSetLayout descLayout;
     VK_CHECK(vkCreateDescriptorSetLayout(device, &descLayout_info, NULL, &descLayout));
+    printf("✓ Descriptor set layout created\n"); fflush(stdout);
 
+    printf("Creating pipeline layout...\n"); fflush(stdout);
     VkPipelineLayoutCreateInfo pipelineLayout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
@@ -320,8 +349,10 @@ int main(int argc, char *argv[]) {
     };
     VkPipelineLayout pipelineLayout;
     VK_CHECK(vkCreatePipelineLayout(device, &pipelineLayout_info, NULL, &pipelineLayout));
+    printf("✓ Pipeline layout created\n"); fflush(stdout);
 
     // Pipeline
+    printf("Creating graphics pipeline...\n"); fflush(stdout);
     VkPipelineShaderStageCreateInfo stages[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
           .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vm, .pName = "main" },
@@ -374,27 +405,30 @@ int main(int argc, char *argv[]) {
     };
     VkPipeline pipeline;
     VK_CHECK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pi, NULL, &pipeline));
+    printf("✓ Graphics pipeline created\n"); fflush(stdout);
 
-    // Descriptor pool and set
-    VkDescriptorPoolSize poolSize = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
-    VkDescriptorPoolCreateInfo descPool_info = {
+    // Descriptor pool and set (using vkcube's inline style)
+    printf("Creating descriptor pool...\n"); fflush(stdout);
+    VkDescriptorPool descPool;
+    VK_CHECK(vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = 1,
         .poolSizeCount = 1,
-        .pPoolSizes = &poolSize
-    };
-    VkDescriptorPool descPool;
-    VK_CHECK(vkCreateDescriptorPool(device, &descPool_info, NULL, &descPool));
+        .pPoolSizes = &(VkDescriptorPoolSize){VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
+    }, NULL, &descPool));
+    printf("✓ Descriptor pool created!\n"); fflush(stdout);
 
-    VkDescriptorSetAllocateInfo descSet_alloc = {
+    printf("Allocating descriptor set...\n"); fflush(stdout);
+    VkDescriptorSet descSet;
+    VK_CHECK(vkAllocateDescriptorSets(device, &(VkDescriptorSetAllocateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = descPool,
         .descriptorSetCount = 1,
         .pSetLayouts = &descLayout
-    };
-    VkDescriptorSet descSet;
-    VK_CHECK(vkAllocateDescriptorSets(device, &descSet_alloc, &descSet));
+    }, &descSet));
+    printf("✓ Descriptor set allocated!\n"); fflush(stdout);
 
+    printf("Updating descriptor sets...\n"); fflush(stdout);
     VkDescriptorBufferInfo bufferInfo = { uboBuf, 0, sizeof(UniformBufferObject) };
     VkWriteDescriptorSet write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -405,15 +439,19 @@ int main(int argc, char *argv[]) {
         .pBufferInfo = &bufferInfo
     };
     vkUpdateDescriptorSets(device, 1, &write, 0, NULL);
+    printf("✓ Descriptor sets updated!\n"); fflush(stdout);
 
     // Command pool/buffer
+    printf("Creating command pool...\n"); fflush(stdout);
     VkCommandPoolCreateInfo cmdPool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
     };
     VkCommandPool cmdPool;
     VK_CHECK(vkCreateCommandPool(device, &cmdPool_info, NULL, &cmdPool));
+    printf("✓ Command pool created!\n"); fflush(stdout);
 
+    printf("Allocating command buffer...\n"); fflush(stdout);
     VkCommandBufferAllocateInfo cmd_alloc = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = cmdPool,
@@ -422,20 +460,28 @@ int main(int argc, char *argv[]) {
     };
     VkCommandBuffer cmd;
     VK_CHECK(vkAllocateCommandBuffers(device, &cmd_alloc, &cmd));
+    printf("✓ Command buffer allocated!\n"); fflush(stdout);
 
+    printf("Creating fence...\n"); fflush(stdout);
     VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VkFence fence;
     VK_CHECK(vkCreateFence(device, &fence_info, NULL, &fence));
+    printf("✓ Fence created!\n"); fflush(stdout);
 
     // Get image layout
+    printf("Getting image subresource layout...\n"); fflush(stdout);
     VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
     VkSubresourceLayout layout;
     vkGetImageSubresourceLayout(device, rtImg, &subres, &layout);
+    printf("✓ Got image layout (offset: %llu, rowPitch: %llu)\n",
+           (unsigned long long)layout.offset, (unsigned long long)layout.rowPitch); fflush(stdout);
 
     // Set initial mode
+    printf("Setting initial DRM mode...\n"); fflush(stdout);
     drmModeSetCrtc(drm_fd, crtc_id, fb_id[0], 0, 0, &conn->connector_id, 1, mode);
+    printf("✓ Initial mode set\n"); fflush(stdout);
 
-    printf("\n✓ Running shader\n");
+    printf("\n✓ Running shader\n"); fflush(stdout);
 
     struct timespec start, last_frame, last_report;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -448,13 +494,16 @@ int main(int argc, char *argv[]) {
     const long target_frame_ns = 16666666; // 60 FPS
 
     // === Render Loop ===
+    printf("Entering render loop...\n"); fflush(stdout);
     while (1) {
+        printf("  Frame start...\n"); fflush(stdout);
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         float t = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9f;
 
         if (t >= duration) break;
 
+        printf("  Updating uniforms (t=%.2f)...\n", t); fflush(stdout);
         // Update uniforms
         UniformBufferObject ubo;
         ubo.iResolution[0] = (float)W;
@@ -463,13 +512,16 @@ int main(int argc, char *argv[]) {
         ubo.iTime = t;
         ubo.iMouse[0] = ubo.iMouse[1] = ubo.iMouse[2] = ubo.iMouse[3] = 0.0f;
         memcpy(uboPtr, &ubo, sizeof(ubo));
+        printf("  Uniforms updated\n"); fflush(stdout);
 
         // Record
+        printf("  Beginning command buffer...\n"); fflush(stdout);
         VkCommandBufferBeginInfo begin = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
         };
         vkBeginCommandBuffer(cmd, &begin);
+        printf("  Command buffer begun\n"); fflush(stdout);
 
         VkClearValue clear = { .color = { {0.0f, 0.0f, 0.0f, 1.0f} } };
         VkRenderPassBeginInfo rp_begin = {
