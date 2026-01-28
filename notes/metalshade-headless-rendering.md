@@ -253,3 +253,53 @@ vkcube_zerocopy works because it:
 
 The blob path is proven to work (vkcube), but it's orthogonal to proving shader rendering works.
 
+
+## Cherry-Pick from Zero-Copy Branch (2026-01-28 Late PM)
+
+Successfully extracted DRM-based shadertoy viewer from `zero-copy` branch!
+
+### What We Got:
+- **File**: `guest-demos/shadertoy/shadertoy_drm.c` (~618 lines)
+- **Architecture**: DRM/GBM + LINEAR HOST_VISIBLE images + memcpy to scanout
+- **Status on zero-copy**: Implemented but has Venus fence wait error
+
+### Test Results with Metalshade Shaders:
+
+✅ **Much Better Progress**:
+1. ✅ DRM device opened
+2. ✅ Vulkan instance created  
+3. ✅ Device + queue created
+4. ✅ Image + memory allocated (HOST_VISIBLE)
+5. ✅ Image view created
+6. ✅ Render pass created
+7. ✅ Framebuffer created
+8. ✅ Shaders loaded (vert.spv + frag.spv)
+9. ✅ Uniform buffer created & mapped
+10. ✅ Descriptor sets created & updated
+11. ✅ Pipeline created
+12. ✅ Command buffer recorded
+13. ✅ Commands submitted to queue
+14. ❌ **Hangs at fence wait**: `stuck in fence wait with iter at 1024`
+15. ❌ **Ring abort**: `aborting on ring fatal error at iter 1024`
+
+### Key Difference from Our Attempts:
+- Our `shader_nosurface.c`: Failed at queue submit (ring error immediately)
+- Zero-copy `shadertoy_drm.c`: Submits successfully, hangs waiting for GPU completion
+
+### This Means:
+- ✅ Command submission works!
+- ✅ Venus accepts our commands
+- ❌ GPU doesn't complete the work (or Venus doesn't poll properly)
+
+### Comparison to Working test_tri:
+- test_tri renders successfully (triangle displays)
+- shadertoy_drm hangs at fence
+- **Likely culprit**: Shader complexity or descriptor set mismatch
+
+### Next Debug Steps:
+1. Try simple gradient shader (not complex bump-mapped one)
+2. Compare shadertoy_drm descriptor setup vs test_tri
+3. Check if iChannel0 texture is causing issues
+4. Try without uniform buffer first
+
+This is the closest we've gotten to working shader rendering!
