@@ -303,3 +303,38 @@ Successfully extracted DRM-based shadertoy viewer from `zero-copy` branch!
 4. Try without uniform buffer first
 
 This is the closest we've gotten to working shader rendering!
+
+
+## SOLUTION FOUND (2026-01-28 Evening)
+
+Successfully created **shadertoy_viewer.c** based on vkcube_anim architecture!
+
+### Test Results:
+- ✅ **test_simple shaders**: Works perfectly
+- ✅ **shadertoy_simple shaders**: **405 FPS** with animated gradient!
+- ❌ **shadertoy_vkcube shaders**: Blue screen only (binding mismatch)
+
+### Root Cause of Blue Screen:
+The viewer creates ONE descriptor binding at `binding = 0`:
+```c
+.pBindings=&(VkDescriptorSetLayoutBinding){
+    0,  // binding = 0 ← CRITICAL!
+    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+    VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT
+}
+```
+
+Shaders MUST match this:
+- ✅ `binding = 0` → Works (405 FPS)
+- ❌ `binding = 1` → Blue screen (reading wrong/nonexistent data)
+
+### Files:
+- `/opt/other/qemu/guest-demos/shadertoy/shadertoy_viewer.c` - Working viewer
+- `/opt/other/qemu/guest-demos/shadertoy/shadertoy.vert` - Reference vertex shader
+- `/opt/other/qemu/guest-demos/shadertoy/shadertoy_gradient.frag` - Reference fragment shader
+- `/opt/other/qemu/guest-demos/shadertoy/README.md` - Usage guide
+
+### Performance:
+- 405 FPS with animated gradient (1280x800)
+- No fence hangs with Venus/virtgpu on Apple Silicon
+- Based on proven vkcube_anim architecture (1100 FPS)
