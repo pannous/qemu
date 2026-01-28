@@ -36,4 +36,7 @@ typedef struct HVFState HVFState;
 DECLARE_INSTANCE_CHECKER(HVFState, HVF_STATE,
                          TYPE_HVF_ACCEL)
 
+/* Notify HVF about keyboard activity to prevent idle mode */
+void hvf_notify_keyboard_activity(void);
+
 #endif

@@ -43,6 +43,15 @@
 #define MDSCR_EL1_SS_SHIFT  0
 #define MDSCR_EL1_MDE_SHIFT 15
 
+/* Global variable to track keyboard activity for idle mode management */
+static int64_t last_keyboard_activity_ns = 0;
+
+/* Called by UI layer when keyboard activity is detected */
+void hvf_notify_keyboard_activity(void)
+{
+    last_keyboard_activity_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+}
+
 static const uint16_t dbgbcr_regs[] = {
     HV_SYS_REG_DBGBCR0_EL1,
     HV_SYS_REG_DBGBCR1_EL1,
@@ -1785,6 +1794,14 @@ static int hvf_wfi(CPUState *cpu)
             /* After activity reset, require cooldown period before counting again */
             if (last_reset_time > 0 && (now - last_reset_time) < 100000000) {  /* 100ms cooldown */
                 idle_counter = 0;
+                last_wfi_time = now;
+                return EXCP_HLT;
+            }
+
+            /* Disable idle mode for 10 seconds after keyboard activity */
+            if (last_keyboard_activity_ns > 0 && (now - last_keyboard_activity_ns) < 10000000000) {  /* 10 seconds in ns */
+                idle_counter = 0;
+                idle_start_time = 0;
                 last_wfi_time = now;
                 return EXCP_HLT;
             }

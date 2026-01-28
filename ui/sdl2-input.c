@@ -28,6 +28,7 @@
 #include "ui/input.h"
 #include "ui/sdl2.h"
 #include "trace.h"
+#include "system/hvf.h"
 
 void sdl2_process_key(struct sdl2_console *scon,
                       SDL_KeyboardEvent *ev)
@@ -41,6 +42,12 @@ void sdl2_process_key(struct sdl2_console *scon,
     qcode = qemu_input_map_usb_to_qcode[ev->keysym.scancode];
     trace_sdl2_process_key(ev->keysym.scancode, qcode,
                            ev->type == SDL_KEYDOWN ? "down" : "up");
+
+    /* Notify HVF about keyboard activity to disable idle mode for 10 seconds */
+    if (ev->type == SDL_KEYDOWN) {
+        hvf_notify_keyboard_activity();
+    }
+
     qkbd_state_key_event(scon->kbd, qcode, ev->type == SDL_KEYDOWN);
 
     if (QEMU_IS_TEXT_CONSOLE(con)) {
