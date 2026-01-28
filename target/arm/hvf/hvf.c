@@ -50,6 +50,9 @@ static int64_t last_keyboard_activity_ns = 0;
 void hvf_notify_keyboard_activity(void)
 {
     last_keyboard_activity_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    fprintf(stderr, "[KEYBOARD] Activity detected at %lld ns - idle mode disabled for 10s\n",
+            last_keyboard_activity_ns);
+    fflush(stderr);
 }
 
 static const uint16_t dbgbcr_regs[] = {
@@ -1756,6 +1759,25 @@ static int hvf_wfi(CPUState *cpu)
         return 0;
     }
 
+    /* Check keyboard activity BEFORE incrementing counter */
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (last_keyboard_activity_ns > 0 && (now - last_keyboard_activity_ns) < 10000000000) {  /* 10 seconds in ns */
+        int64_t elapsed_ms = (now - last_keyboard_activity_ns) / 1000000;
+        static int64_t last_debug_time = 0;
+        /* Print debug every 1 second to avoid spam */
+        if (now - last_debug_time > 1000000000) {
+            fprintf(stderr, "[IDLE-BLOCKED] Keyboard: %lld ms ago, idle_counter=%d (resetting counter)\n",
+                    elapsed_ms, idle_counter);
+            fflush(stderr);
+            last_debug_time = now;
+        }
+        /* Aggressively reset idle state during keyboard activity */
+        idle_counter = 0;
+        idle_start_time = 0;
+        last_reset_time = now;
+        return EXCP_HLT;
+    }
+
     /* No work - increase counter slowly (builds positive) */
     idle_counter++;
 
@@ -1794,14 +1816,6 @@ static int hvf_wfi(CPUState *cpu)
             /* After activity reset, require cooldown period before counting again */
             if (last_reset_time > 0 && (now - last_reset_time) < 100000000) {  /* 100ms cooldown */
                 idle_counter = 0;
-                last_wfi_time = now;
-                return EXCP_HLT;
-            }
-
-            /* Disable idle mode for 10 seconds after keyboard activity */
-            if (last_keyboard_activity_ns > 0 && (now - last_keyboard_activity_ns) < 10000000000) {  /* 10 seconds in ns */
-                idle_counter = 0;
-                idle_start_time = 0;
                 last_wfi_time = now;
                 return EXCP_HLT;
             }

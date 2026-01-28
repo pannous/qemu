@@ -1,0 +1,9 @@
+tree c2d7107cb30146d992f33b8f8bda361c5cc2b667
+parent d1fe2b245910d42715e556458afe7d975d9417ef
+author bellard <bellard@c046a42c-6fe2-441c-8c8c-71466251a162> 1053881517 +0000
+committer bellard <bellard@c046a42c-6fe2-441c-8c8c-71466251a162> 1053881517 +0000
+
+direct chaining for PowerPC and i386
+
+
+git-svn-id: svn://svn.savannah.nongnu.org/qemu/trunk@185 c046a42c-6fe2-441c-8c8c-71466251a162

@@ -1,0 +1,4 @@
+self modifying code also tests translation block chaining invalidation
+
+
+git-svn-id: svn://svn.savannah.nongnu.org/qemu/trunk@184 c046a42c-6fe2-441c-8c8c-71466251a162
