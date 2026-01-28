@@ -128,17 +128,41 @@ VkDescriptorSetLayoutBinding bindings[2] = {
 
 1. ✅ Copy vkcube_anim.c to guest
 2. ✅ Create shadertoy test shaders
-3. ⏳ Modify to accept shader paths as arguments
-4. ⏳ Add second UBO for shadertoy uniforms
-5. ⏳ Change from cube (36 verts) to fullscreen quad (6 verts)
-6. ⏳ Test with simple gradient shader
+3. ✅ Modify to accept shader paths as arguments
+4. ✅ Add second UBO for shadertoy uniforms
+5. ✅ Change from cube (36 verts) to fullscreen quad (6 verts)
+6. ✅ Test with simple gradient shader
 7. ⏳ Test with more complex shadertoy shaders
 
-## Success Criteria
+## ✅ SUCCESS!
 
-If this works, we'll have:
+**shadertoy_viewer.c** is working perfectly:
+- **298 FPS** with custom gradient shader
+- **No fence hangs** with Venus/virtgpu
+- Clean, proven architecture from vkcube_anim
+- Accepts any vertex + fragment shader pair
+
+### Test Results:
+```
+Shader Viewer on Virtio-GPU Venus (Apple M2 Pro) (1280x800)
+Rendering for 5.0s...
+Done! 1491 frames in 5.0s (298.2 FPS)
+```
+
+### Usage:
+```bash
+# Compile
+gcc -I/usr/include/libdrm -o shadertoy_viewer shadertoy_viewer.c -ldrm -lvulkan -lgbm -lm
+
+# Run
+./shadertoy_viewer vert.spv frag.spv [duration_sec]
+```
+
+## Success Criteria - ALL MET ✅
+
 - ✅ Proven stable base (vkcube_anim architecture)
 - ✅ Working uniform buffers
 - ✅ Working descriptor binding
 - ✅ Ability to test custom GLSL shaders
 - ✅ No fence hangs!
+- ✅ 298 FPS performance!
