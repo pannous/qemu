@@ -219,3 +219,37 @@ vkMapMemory(device, stagingMemory, 0, size, 0, &data);
 - Disk space tight - use `/tmp` for output files
 - vkcube_zerocopy achieves 1100 FPS, shows Venus performance is excellent
 - The shader (Bumped_Sinusoidal_Warp.frag) is complex - simpler shaders may work better for testing
+
+
+## DRM Blob Integration Attempts (2026-01-28 PM)
+
+Attempted to combine vkcube's DRM blob approach with shader rendering:
+
+### What We Tried:
+1. **DRM virtgpu blob creation** - ✅ Works (blob created successfully)
+2. **CPU mapping via mmap** - ❌ Fails with EINVAL (known limitation)
+3. **Prime FD export** - ✅ Works (got FD for external memory)
+4. **Vulkan external memory import** - ❌ Fails with VK_ERROR_INCOMPATIBLE_DRIVER (-8)
+
+### Root Cause:
+Venus on macOS host doesn't support:
+- DMA_BUF import for VK_IMAGE_TILING_LINEAR
+- Host pointer import requires different setup
+- Needs DRM_FORMAT_MODIFIER_EXT path (complex)
+
+### Working Path:
+vkcube_zerocopy works because it:
+1. Uses DRM_FORMAT_MODIFIER_EXT (not LINEAR)
+2. Queries supported modifiers first
+3. Uses complex modifier-aware import
+4. Falls back to LINEAR + copy if needed
+
+### Pragmatic Next Step:
+**Skip blob import, prove shader rendering works:**
+1. Use regular VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+2. Render shaders successfully
+3. Read back via staging buffer
+4. THEN optimize with blobs if needed
+
+The blob path is proven to work (vkcube), but it's orthogonal to proving shader rendering works.
+
