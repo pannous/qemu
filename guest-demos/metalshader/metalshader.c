@@ -26,7 +26,6 @@
 #include <vulkan/vulkan.h>
 
 #define MAX_SHADERS 256
-#define SHADER_DIR "/root/metalshade/shaders"
 
 typedef struct {
     float iResolution[3];
@@ -72,11 +71,16 @@ static void generate_texture(uint8_t *data) {
     }
 }
 
+// Extract basename from path (e.g., "shaders/plasma" -> "plasma")
+static const char *get_basename(const char *path) {
+    const char *last_slash = strrchr(path, '/');
+    return last_slash ? last_slash + 1 : path;
+}
+
 // Scan shaders directory and build list
 static void scan_shaders(const char *shader_dir) {
     DIR *dir = opendir(shader_dir);
     if (!dir) {
-        printf("Failed to open shader directory: %s\n", shader_dir);
         return;
     }
 
@@ -108,6 +112,21 @@ static void scan_shaders(const char *shader_dir) {
         }
     }
     closedir(dir);
+}
+
+// Scan multiple directories for shaders
+static void scan_all_shaders() {
+    const char *search_dirs[] = {
+        ".",                           // Current directory
+        "./shaders",                   // ./shaders subdirectory
+        "/root/metalshade/shaders",    // Default metalshade location
+        NULL
+    };
+
+    shader_count = 0;
+    for (int i = 0; search_dirs[i] != NULL; i++) {
+        scan_shaders(search_dirs[i]);
+    }
 
     printf("Found %d compiled shader(s)\n", shader_count);
     for (int i = 0; i < shader_count; i++) {
@@ -174,19 +193,21 @@ static void check_keyboard(int kbd_fd) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("Usage: %s <shader_name>\n", argv[0]);
-        printf("  shader_name: Base name without extension (e.g., 'bumped_sinusoidal_warp')\n");
+        printf("  shader_name: Base name without extension (e.g., 'plasma' or 'shaders/plasma')\n");
         printf("\nControls:\n");
         printf("  Arrow Left/Right: Switch between shaders\n");
         printf("  ESC/Q: Quit\n");
         return 1;
     }
 
-    const char *shader_name = argv[1];
+    // Extract basename from shader argument (handles "shaders/plasma" -> "plasma")
+    const char *shader_name = get_basename(argv[1]);
 
-    // Scan available shaders
-    scan_shaders(SHADER_DIR);
+    // Scan available shaders in multiple directories
+    scan_all_shaders();
     if (shader_count == 0) {
-        printf("No compiled shaders found in %s\n", SHADER_DIR);
+        printf("No compiled shaders found.\n");
+        printf("Searched: . ./shaders /root/metalshade/shaders\n");
         printf("Compile shaders with: glslangValidator -V <shader>.vert -o <shader>.vert.spv\n");
         return 1;
     }
