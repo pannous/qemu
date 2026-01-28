@@ -382,3 +382,71 @@ Our checkerboard texture visualizes the warp effect perfectly.
 - 306 FPS with complex warp shader on Venus/virtgpu
 - No fence hangs, no ring errors
 - Procedural texture sufficient for shader testing
+
+
+## Metalshader - Interactive Viewer (2026-01-28 Final)
+
+Created **metalshader** - an interactive shader viewer with keyboard navigation!
+
+### Usage:
+```bash
+./metalshader <shader_name>
+# Example: ./metalshader bumped_sinusoidal_warp
+```
+
+### Features:
+- ✅ **Simple shader selection**: Just base name, no extensions needed
+- ✅ **Arrow key navigation**: Left/Right to switch shaders in real-time
+- ✅ **Auto-discovery**: Scans `/root/metalshade/shaders/` for compiled shaders
+- ✅ **Live reload**: Hot-swaps pipeline and shaders without restart
+- ✅ **Infinite loop**: Runs continuously until ESC/Q pressed
+
+### Implementation Highlights:
+```c
+// Directory scanning
+scan_shaders("/root/metalshade/shaders");  // Finds all .frag files
+find_shader_by_name("bumped_sinusoidal_warp");  // No extensions needed
+
+// Keyboard input via evdev
+int kbd_fd = open_keyboard();  // Opens /dev/input/event*
+check_keyboard(kbd_fd);  // Non-blocking event polling
+
+// Live shader reload
+if (reload_requested) {
+    vkDestroyPipeline(device, pipeline, NULL);
+    // Load new shaders and recreate pipeline
+    pipeline = create_pipeline(shaders[current_shader]);
+}
+```
+
+### Controls:
+- **Arrow Left**: Previous shader
+- **Arrow Right**: Next shader
+- **ESC/Q**: Quit
+
+### Files:
+- `/opt/other/qemu/guest-demos/metalshader/metalshader.c` (753 lines)
+- `/opt/other/qemu/guest-demos/metalshader/README.md`
+
+### Build on Guest:
+```bash
+gcc -I/usr/include/libdrm -o metalshader metalshader.c -ldrm -lvulkan -lgbm -lm
+```
+
+### Comparison to Previous Viewers:
+
+| Feature | test_simple | shadertoy_viewer | shadertoy_viewer_v2 | **metalshader** |
+|---------|-------------|------------------|---------------------|-----------------|
+| Textures | ❌ | ❌ | ✅ | ✅ |
+| Navigation | ❌ | ❌ | ❌ | ✅ Arrow keys |
+| Shader args | Full paths | Full paths | Full paths | **Base name only** |
+| Duration | Fixed | Fixed | Fixed | **Infinite** |
+| Live reload | ❌ | ❌ | ❌ | ✅ |
+| Auto-discover | ❌ | ❌ | ❌ | ✅ |
+
+### Result:
+✅ **Interactive ShaderToy gallery working in headless Alpine VM!**
+- Browse all shaders with arrow keys
+- Real-time shader switching without restart
+- Simple usage: `./metalshader <shader_name>`
+- 300+ FPS with live navigation
