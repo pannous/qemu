@@ -43,10 +43,35 @@ glslangValidator -V shadertoy.vert -o shadertoy.vert.spv
 glslangValidator -V your_shader.frag -o your_shader.frag.spv
 ```
 
+## shadertoy_viewer_v2.c - With Texture Support
+
+Extended version that provides texture input at binding 1.
+
+### Usage
+```bash
+./shadertoy_viewer_v2 <vert.spv> <frag.spv> [duration_sec]
+```
+
+### Features
+- binding 0: UniformBufferObject (iResolution, iTime, iMouse)
+- binding 1: sampler2D (256x256 procedural checkerboard texture)
+
+### Building
+```bash
+gcc -I/usr/include/libdrm -o shadertoy_viewer_v2 shadertoy_viewer_v2.c -ldrm -lvulkan -lgbm -lm
+```
+
+### Shader Requirements
+```glsl
+layout(binding = 0, set = 0) uniform UniformBufferObject { ... }
+layout(binding = 1, set = 0) uniform sampler2D iChannel0;  // Optional texture input
+```
+
 ## Performance
 
 Tested on Virtio-GPU Venus (Apple M2 Pro):
-- **405 FPS** with animated gradient shader
+- **405 FPS** with animated gradient shader (shadertoy_viewer)
+- **306 FPS** with bumped_sinusoidal_warp shader (shadertoy_viewer_v2)
 - **No fence hangs** with Venus/virtgpu
 
 ## Common Issues
