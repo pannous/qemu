@@ -9,6 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QEMU_DIR="$(dirname "$SCRIPT_DIR")"
 
+
 # Paths
 QEMU="${QEMU_DIR}/build/qemu-system-aarch64"
 DISK="${QEMU_DIR}/alpine-overlay.qcow2"
