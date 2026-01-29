@@ -22,3 +22,6 @@ GTAGS
 *.gcov
 
 alpine-venus.img
+alpine-overlay.qcow2
+
+.cache
