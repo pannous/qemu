@@ -28,6 +28,9 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
 #include <crt_externs.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <fcntl.h>
 
 #include "qemu/help-texts.h"
 #include "qemu-main.h"
@@ -750,7 +753,8 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
 - (void) resizeWindow
 {
-    [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
+    // Don't set aspect ratio - window is resizable and should allow any dimensions
+    // [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
 
     if (!([[self window] styleMask] & NSWindowStyleMaskResizable)) {
         [[self window] setContentSize:NSMakeSize(screen.width, screen.height)];
@@ -1478,7 +1482,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
         // create a window
         window = [[NSWindow alloc] initWithContentRect:[cocoaView frame]
-            styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskClosable
+            styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
         if(!window) {
             error_report("(cocoa) can't create window");
@@ -2279,6 +2283,85 @@ static void cocoa_cursor_define(DisplayChangeListener *dcl, QEMUCursor *cursor)
     });
 }
 
+// Monitor display control socket for guest fullscreen requests
+static int display_ctl_fd = -1;
+static QemuCocoaAppController *global_controller = nil;
+
+static void check_display_control_commands(void)
+{
+    // Try to connect if not connected
+    if (display_ctl_fd < 0) {
+        display_ctl_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (display_ctl_fd >= 0) {
+            struct sockaddr_un addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, "/tmp/qemu-display-ctl.sock", sizeof(addr.sun_path) - 1);
+
+            if (connect(display_ctl_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                close(display_ctl_fd);
+                display_ctl_fd = -1;
+                return;  // Will retry on next poll
+            }
+            fcntl(display_ctl_fd, F_SETFL, O_NONBLOCK);
+            COCOA_DEBUG("Display control connected to QEMU\n");
+        }
+    }
+
+    if (display_ctl_fd >= 0) {
+        char buf[256];
+        ssize_t n = read(display_ctl_fd, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+
+            if (strstr(buf, "FULLSCREEN")) {
+                COCOA_DEBUG("Guest requested fullscreen toggle\n");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [global_controller doToggleFullScreen:nil];
+                });
+            }
+            else if (strstr(buf, "RESIZE:")) {
+                // Parse resolution: RESIZE:800x600
+                int width, height;
+                if (sscanf(buf, "RESIZE:%dx%d", &width, &height) == 2) {
+                    if (width >= 640 && width <= 3840 && height >= 480 && height <= 2160) {
+                        COCOA_DEBUG("Guest requested resize: %dx%d\n", width, height);
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            NSWindow *window = [cocoaView window];
+                            if (window && !([window styleMask] & NSWindowStyleMaskFullScreen)) {
+                                // Resize to requested dimensions
+                                [window setContentSize:NSMakeSize(width, height)];
+                                [window center];
+                            }
+                        });
+                    }
+                }
+            }
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            // Connection closed or error
+            close(display_ctl_fd);
+            display_ctl_fd = -1;
+        }
+    }
+}
+
+static void setup_display_control_monitor(QemuCocoaAppController *controller)
+{
+    global_controller = controller;
+
+    // Poll socket every 100ms to connect to QEMU chardev and read commands
+    // QEMU creates the socket as server, we connect as client
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    // Start polling after 1 second to give QEMU time to create socket
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                             100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        check_display_control_commands();
+    });
+    dispatch_resume(timer);
+}
+
 static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
 {
     NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
@@ -2346,6 +2429,9 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
     qemu_event_init(&cbevent, false);
     cbowner = [[QemuCocoaPasteboardTypeOwner alloc] init];
     qemu_clipboard_peer_register(&cbpeer);
+
+    // Setup display control socket monitor for guest fullscreen requests
+    setup_display_control_monitor(controller);
 
     [pool release];
 

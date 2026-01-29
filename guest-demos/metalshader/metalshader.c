@@ -77,6 +77,31 @@ static const char *get_basename(const char *path) {
     return last_slash ? last_slash + 1 : path;
 }
 
+// Find QEMU display control port dynamically
+static const char *find_display_port() {
+    static char port_path[64] = {0};
+    if (port_path[0]) return port_path;  // Cached
+
+    // Search for org.qemu.display port
+    for (int i = 0; i < 10; i++) {
+        char name_path[128];
+        snprintf(name_path, sizeof(name_path), "/sys/class/virtio-ports/vport%dp1/name", i);
+        FILE *f = fopen(name_path, "r");
+        if (f) {
+            char name[64];
+            if (fgets(name, sizeof(name), f)) {
+                if (strstr(name, "org.qemu.display")) {
+                    snprintf(port_path, sizeof(port_path), "/dev/vport%dp1", i);
+                    fclose(f);
+                    return port_path;
+                }
+            }
+            fclose(f);
+        }
+    }
+    return NULL;
+}
+
 // Scan shaders directory and build list
 static void scan_shaders(const char *shader_dir) {
     DIR *dir = opendir(shader_dir);
@@ -181,6 +206,23 @@ static void check_keyboard(int kbd_fd) {
                 reload_requested = 1;
                 printf("\n>> Next shader: %s\n", shaders[current_shader].name);
                 break;
+            case KEY_F:
+                // Signal host to toggle fullscreen via virtio-serial
+                printf("\n[F] Toggling host fullscreen...\n");
+                const char *port = find_display_port();
+                if (port) {
+                    FILE *f = fopen(port, "w");
+                    if (f) {
+                        fprintf(f, "FULLSCREEN\n");
+                        fflush(f);
+                        fclose(f);
+                    } else {
+                        printf("    (Can't open %s, press Ctrl+Alt+F on Mac host)\n", port);
+                    }
+                } else {
+                    printf("    (No display port found, press Ctrl+Alt+F on Mac host)\n");
+                }
+                break;
             case KEY_ESC:
             case KEY_Q:
                 printf("\nExiting...\n");
@@ -191,17 +233,11 @@ static void check_keyboard(int kbd_fd) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        printf("Usage: %s <shader_name>\n", argv[0]);
-        printf("  shader_name: Base name without extension (e.g., 'plasma' or 'shaders/plasma')\n");
-        printf("\nControls:\n");
-        printf("  Arrow Left/Right: Switch between shaders\n");
-        printf("  ESC/Q: Quit\n");
-        return 1;
-    }
+    // Default to "example" shader if no argument provided
+    const char *shader_arg = (argc < 2) ? "example" : argv[1];
 
     // Extract basename from shader argument (handles "shaders/plasma" -> "plasma")
-    const char *shader_name = get_basename(argv[1]);
+    const char *shader_name = get_basename(shader_arg);
 
     // Scan available shaders in multiple directories
     scan_all_shaders();

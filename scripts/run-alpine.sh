@@ -104,6 +104,9 @@ COMMON_OPTS=(
     -fsdev local,id=mesa_dev,path=/opt/other/mesa,security_model=mapped-xattr
     -device virtio-9p-pci,fsdev=mesa_dev,mount_tag=mesa_share
     -serial mon:stdio
+    -device virtio-serial-pci
+    -chardev socket,path=/tmp/qemu-display-ctl.sock,server=on,wait=off,id=display_ctl
+    -device virtserialport,chardev=display_ctl,name=org.qemu.display.0
 )
 
 echo "Starting Alpine Linux aarch64 VM (mode: $MODE)..."
