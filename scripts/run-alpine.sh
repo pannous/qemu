@@ -90,9 +90,13 @@ else
     CUSTOM_KERNEL="${QEMU_KERNEL:-}"
 fi
 
+# Display resolution (override with QEMU_XRES and QEMU_YRES environment variables)
+XRES="${QEMU_XRES:-800}"
+YRES="${QEMU_YRES:-600}"
+
 COMMON_OPTS=(
     -M virt $ACCEL_OPTS -m 2G -smp 4
-    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M
+    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M,xres=$XRES,yres=$YRES
     -display cocoa
     -device qemu-xhci -device usb-kbd -device usb-tablet
     -device virtio-net-pci,netdev=net0
@@ -103,6 +107,7 @@ COMMON_OPTS=(
 )
 
 echo "Starting Alpine Linux aarch64 VM (mode: $MODE)..."
+echo "  Display: ${XRES}x${YRES} (set QEMU_XRES/QEMU_YRES to change)"
 echo "  SSH: ssh -p 2222 root@localhost"
 echo "  Serial console: Ctrl-A X to quit"
 echo ""
