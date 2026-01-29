@@ -36,9 +36,10 @@ mat4 perspectiveMatrix(float fov, float aspect, float near, float far) {
     );
 }
 
-// Ray-box intersection for cube rendering
+// Ray-box intersection for cube rendering (safe version)
 float boxIntersect(vec3 ro, vec3 rd, vec3 boxSize) {
-    vec3 m = 1.0 / rd;
+    // Prevent division by zero
+    vec3 m = 1.0 / (rd + vec3(1e-8));
     vec3 n = m * ro;
     vec3 k = abs(m) * boxSize;
     vec3 t1 = -n - k;
@@ -57,10 +58,11 @@ void main() {
     vec3 ro = vec3(0.0, 0.0, 3.0); // Ray origin
     vec3 rd = normalize(vec3(uv, -1.5)); // Ray direction
 
-    // Rotate the ray direction to animate the cube
+    // Rotate the entire scene (camera + ray) to animate the cube
     float angle = ubo.iTime;
     mat4 rot = rotationMatrix(normalize(vec3(1.0, 1.0, 0.0)), angle);
-    rd = (rot * vec4(rd, 0.0)).xyz;
+    ro = (rot * vec4(ro, 1.0)).xyz;
+    rd = normalize((rot * vec4(rd, 0.0)).xyz);
 
     // Cube intersection
     vec3 boxSize = vec3(0.8);

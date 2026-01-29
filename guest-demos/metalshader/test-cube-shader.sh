@@ -4,7 +4,7 @@
 set -e
 
 PORT=2222
-SHADER_DIR="/root/metalshade/shaders"
+SHADER_DIR="/root/shaders"
 
 echo "Copying cube shaders to guest..."
 scp -P "$PORT" -o StrictHostKeyChecking=no \

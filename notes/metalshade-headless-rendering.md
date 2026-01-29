@@ -525,3 +525,53 @@ cd /opt/other/qemu/guest-demos/metalshader
 ✅ Animated brightness based on time
 ✅ Grid edge highlighting
 ✅ Full ShaderToy compatibility
+
+## Cube Shader Debug (2026-01-29)
+
+Fixed fence hang and rendering issues in raymarched cube shader.
+
+### Problems Found:
+1. **Fence hang on guest**: MESA-VIRTIO fence timeout at iter 1024
+2. **Host rendering issue**: Checkerboard pattern moving left-down, no colors
+
+### Root Causes:
+1. **Division by zero**: `vec3 m = 1.0 / rd;` causes NaN/Inf when ray direction has near-zero components
+2. **Rotation application**: Rotating only ray direction without camera caused incorrect intersection
+
+### Fixes Applied:
+
+**cube.frag (raymarched version):**
+```glsl
+// Before: Division by zero possible
+vec3 m = 1.0 / rd;
+
+// After: Safe division with epsilon
+vec3 m = 1.0 / (rd + vec3(1e-8));
+
+// Before: Only rotate ray direction
+rd = (rot * vec4(rd, 0.0)).xyz;
+
+// After: Rotate both camera and ray
+ro = (rot * vec4(ro, 1.0)).xyz;
+rd = normalize((rot * vec4(rd, 0.0)).xyz);
+```
+
+**cube_simple.frag (pattern version):**
+- Created simplified version using rotation + step functions
+- No raymarching, just animated patterns
+- Guaranteed safe math operations
+
+### Testing:
+```bash
+cd /opt/other/qemu/guest-demos/metalshader
+./test-cube-fixed.sh
+```
+
+### Result:
+✅ No fence hangs on guest
+✅ Both cube and cube_simple render correctly
+✅ Proper color display
+✅ Smooth animation
+
+### Key Learning:
+Always protect against division by zero in shaders, especially in ray direction calculations. Venus/virtio-gpu drivers are sensitive to NaN/Inf values and will hang on fence waits.
