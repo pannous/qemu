@@ -450,3 +450,78 @@ gcc -I/usr/include/libdrm -o metalshader metalshader.c -ldrm -lvulkan -lgbm -lm
 - Real-time shader switching without restart
 - Simple usage: `./metalshader <shader_name>`
 - 300+ FPS with live navigation
+
+## Cube Shader Fix (2026-01-29)
+
+Fixed fence hang issue with cube shader in metalshader viewer.
+
+### Root Cause:
+Cube shader expected vertex buffer inputs that metalshader doesn't provide:
+```glsl
+layout(location = 0) in vec3 inPos;    // Expected but not provided
+layout(location = 1) in vec3 inColor;  // Expected but not provided
+```
+
+Metalshader uses empty `VkPipelineVertexInputStateCreateInfo` - no vertex buffers.
+
+### Solution:
+Replaced vertex buffer inputs with procedural generation from `gl_VertexIndex`:
+- Generate 6 vertices for fullscreen quad (2 triangles)
+- Use correct `ShaderToyUBO` structure (iResolution, iTime, iMouse)
+- Create animated colors using iTime
+
+### Result:
+✅ Cube shader renders at 1000+ FPS
+✅ No fence hangs
+✅ Full animation support
+
+### Key Learning:
+All shaders for metalshader must generate geometry procedurally - they cannot expect vertex buffer data.
+
+## Cube Shader Port (2026-01-29)
+
+Created metalshader-compatible version of vkcube rotating cube shader.
+
+### Changes from vkcube:
+**Original vkcube shaders:**
+- Used vertex buffers with positions and colors
+- MVP matrix transformation in UBO
+- Simple passthrough to fragment shader
+
+**Metalshader-compatible version:**
+- Vertex shader: Procedural fullscreen quad from `gl_VertexIndex`
+- Fragment shader: Raymarching cube with box intersection
+- Uses ShaderToyUBO (iResolution, iTime, iMouse)
+- Fully procedural animation and geometry
+
+### Implementation:
+```glsl
+// Vertex shader generates fullscreen quad
+vec2 positions[6] = vec2[](...);
+gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+fragCoord = (positions[gl_VertexIndex] * 0.5 + 0.5) * ubo.iResolution.xy;
+
+// Fragment shader raymarches the cube
+float boxIntersect(vec3 ro, vec3 rd, vec3 boxSize);
+// Animated rotation via rotation matrix
+mat4 rot = rotationMatrix(normalize(vec3(1.0, 1.0, 0.0)), ubo.iTime);
+```
+
+### Files:
+- `/opt/other/qemu/guest-demos/metalshader/shaders/cube.vert`
+- `/opt/other/qemu/guest-demos/metalshader/shaders/cube.frag`
+- `/opt/other/qemu/guest-demos/metalshader/shaders/cube.*.spv` (compiled)
+- `/opt/other/qemu/guest-demos/metalshader/test-cube-shader.sh`
+
+### Test:
+```bash
+cd /opt/other/qemu/guest-demos/metalshader
+./test-cube-shader.sh
+```
+
+### Result:
+✅ Rotating 3D cube renders in metalshader viewer
+✅ Six colored faces (red X, green Y, blue Z)
+✅ Animated brightness based on time
+✅ Grid edge highlighting
+✅ Full ShaderToy compatibility
