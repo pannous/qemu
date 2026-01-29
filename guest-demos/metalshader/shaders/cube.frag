@@ -74,27 +74,49 @@ void main() {
         // Hit point
         vec3 pos = ro + rd * t;
 
-        // Determine which face was hit and color accordingly
+        // Calculate normal for lighting
         vec3 absPos = abs(pos);
         float maxComp = max(max(absPos.x, absPos.y), absPos.z);
 
-        vec3 faceColor;
+        vec3 normal = vec3(0.0);
         if (abs(absPos.x - maxComp) < 0.001) {
-            faceColor = vec3(1.0, 0.0, 0.0); // Red faces (X)
+            normal = vec3(sign(pos.x), 0.0, 0.0);
         } else if (abs(absPos.y - maxComp) < 0.001) {
-            faceColor = vec3(0.0, 1.0, 0.0); // Green faces (Y)
+            normal = vec3(0.0, sign(pos.y), 0.0);
         } else {
-            faceColor = vec3(0.0, 0.0, 1.0); // Blue faces (Z)
+            normal = vec3(0.0, 0.0, sign(pos.z));
         }
 
-        // Add some shading based on time for animation
-        float brightness = 0.6 + 0.4 * sin(ubo.iTime * 2.0 + maxComp * 3.0);
-        col = faceColor * brightness;
+        // Create smooth color gradients based on position within the cube
+        // Normalize position to [0,1] range for gradient
+        vec3 normPos = (pos / boxSize) * 0.5 + 0.5;
 
-        // Add edge highlighting
-        vec3 grid = step(0.92, fract(pos * 5.0));
+        // Base color with smooth gradients across all axes
+        vec3 baseColor = vec3(
+            0.5 + 0.5 * sin(normPos.x * 3.14159 + ubo.iTime * 0.5),
+            0.5 + 0.5 * sin(normPos.y * 3.14159 + ubo.iTime * 0.7 + 2.0),
+            0.5 + 0.5 * sin(normPos.z * 3.14159 + ubo.iTime * 0.3 + 4.0)
+        );
+
+        // Add directional lighting
+        vec3 lightDir = normalize(vec3(1.0, 1.0, 1.5));
+        float diffuse = max(dot(normal, lightDir), 0.0);
+        float ambient = 0.3;
+        float lighting = ambient + diffuse * 0.7;
+
+        // Apply lighting to color
+        col = baseColor * lighting;
+
+        // Add subtle specular highlight
+        vec3 viewDir = normalize(-rd);
+        vec3 reflectDir = reflect(-lightDir, normal);
+        float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
+        col += vec3(spec * 0.3);
+
+        // Subtle edge highlighting for depth
+        vec3 grid = step(0.95, fract(pos * 5.0));
         float edge = max(max(grid.x, grid.y), grid.z);
-        col = mix(col, vec3(1.0), edge * 0.5);
+        col = mix(col, col * 1.2, edge * 0.3);
     }
 
     fragColor = vec4(col, 1.0);
