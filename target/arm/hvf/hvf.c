@@ -12,6 +12,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/atomic.h"
 
 #include "system/runstate.h"
 #include "system/hvf.h"
@@ -43,16 +44,16 @@
 #define MDSCR_EL1_SS_SHIFT  0
 #define MDSCR_EL1_MDE_SHIFT 15
 
-/* Global variable to track keyboard activity for idle mode management */
+/* Global variable to track keyboard activity for idle mode management
+ * Must use atomic operations - written by UI thread, read by vCPU thread */
 static int64_t last_keyboard_activity_ns = 0;
 
 /* Called by UI layer when keyboard activity is detected */
 void hvf_notify_keyboard_activity(void)
 {
-    last_keyboard_activity_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    fprintf(stderr, "[KEYBOARD] Activity detected at %lld ns - idle mode disabled for 10s\n",
-            last_keyboard_activity_ns);
-    fflush(stderr);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    /* Use release semantics to ensure visibility across threads */
+    qatomic_set(&last_keyboard_activity_ns, now);
 }
 
 static const uint16_t dbgbcr_regs[] = {
@@ -1761,16 +1762,10 @@ static int hvf_wfi(CPUState *cpu)
 
     /* Check keyboard activity BEFORE incrementing counter */
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    if (last_keyboard_activity_ns > 0 && (now - last_keyboard_activity_ns) < 10000000000) {  /* 10 seconds in ns */
-        int64_t elapsed_ms = (now - last_keyboard_activity_ns) / 1000000;
-        static int64_t last_debug_time = 0;
-        /* Print debug every 1 second to avoid spam */
-        if (now - last_debug_time > 1000000000) {
-            fprintf(stderr, "[IDLE-BLOCKED] Keyboard: %lld ms ago, idle_counter=%d (resetting counter)\n",
-                    elapsed_ms, idle_counter);
-            fflush(stderr);
-            last_debug_time = now;
-        }
+    /* Use acquire semantics to ensure we see latest keyboard activity from UI thread */
+    int64_t kb_activity = qatomic_read(&last_keyboard_activity_ns);
+
+    if (kb_activity > 0 && (now - kb_activity) < 10000000000) {  /* 10 seconds in ns */
         /* Aggressively reset idle state during keyboard activity */
         idle_counter = 0;
         idle_start_time = 0;
