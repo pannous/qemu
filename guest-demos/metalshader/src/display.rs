@@ -1,9 +1,9 @@
 // DRM/GBM display management
 #![cfg(target_os = "linux")]
 
-use drm::control::{connector, crtc, framebuffer, Mode, ResourceHandle};
-use drm::Device as DrmDevice;
-use gbm::{BufferObjectFlags, Device as GbmDevice, Format, AsRaw};
+use drm::control::{connector, crtc, framebuffer, Device as ControlDevice};
+use drm::Device;
+use gbm::{BufferObjectFlags, Device as GbmDevice, Format};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -16,7 +16,6 @@ pub struct Display {
     crtc_id: crtc::Handle,
     width: u32,
     height: u32,
-    stride: u32,
 }
 
 impl Display {
@@ -29,7 +28,7 @@ impl Display {
 
         let drm_fd = drm_file.as_raw_fd();
 
-        // Get resources (DRM device)
+        // Get resources (DRM device) - File now implements Device trait
         let res = drm_file.resource_handles()?;
 
         // Find connected connector
@@ -75,13 +74,13 @@ impl Display {
             BufferObjectFlags::SCANOUT | BufferObjectFlags::RENDERING,
         )?;
 
-        let stride = bo.stride()?;
+        let stride = bo.stride();  // Returns u32, not Result
 
-        // Create framebuffer using GBM device (which implements DRM)
-        let fb_id = gbm_device.add_framebuffer(&bo, 32, 32)?;
+        // Create framebuffer - use the drm_file (File implements Device)
+        let fb_id = drm_file.add_framebuffer(&bo, 32, 32)?;
 
-        // Set CRTC
-        gbm_device.set_crtc(
+        // Set CRTC - use drm_file
+        drm_file.set_crtc(
             crtc_id,
             Some(fb_id),
             (0, 0),
@@ -98,7 +97,6 @@ impl Display {
             crtc_id,
             width: width as u32,
             height: height as u32,
-            stride,
         })
     }
 
@@ -107,33 +105,23 @@ impl Display {
     }
 
     pub fn present(&mut self, frame_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Map GBM buffer for writing
-        let mut buffer = self.bo.map_mut(
-            0,
-            0,
-            self.width,
-            self.height,
-            gbm::BufferAccessFlags::WRITE,
-        )?;
+        // Map GBM buffer using closure-based API (gbm 0.18)
+        self.bo.map(0, 0, self.width, self.height, |mapping| {
+            let bytes_per_pixel = 4;
+            let row_size = self.width * bytes_per_pixel;
+            let stride = mapping.stride();
+            let buffer_slice = mapping.buffer_mut();
 
-        // Copy frame data
-        let bytes_per_pixel = 4;
-        let row_size = self.width * bytes_per_pixel;
-        let stride = buffer.stride() as u32;
-
-        // Access the buffer data slice
-        let buffer_slice = buffer.as_mut();
-
-        for y in 0..self.height as usize {
-            let dst_offset = y * stride as usize;
-            let src_offset = y * row_size as usize;
-            let dst = &mut buffer_slice[dst_offset..dst_offset + row_size as usize];
-            let src = &frame_data[src_offset..src_offset + row_size as usize];
-            dst.copy_from_slice(src);
-        }
-
-        // Buffer automatically unmapped on drop
-
-        Ok(())
+            for y in 0..self.height as usize {
+                let dst_offset = y * stride as usize;
+                let src_offset = y * row_size as usize;
+                let copy_len = row_size.min((buffer_slice.len() - dst_offset) as u32) as usize;
+                if dst_offset + copy_len <= buffer_slice.len() && src_offset + copy_len <= frame_data.len() {
+                    buffer_slice[dst_offset..dst_offset + copy_len]
+                        .copy_from_slice(&frame_data[src_offset..src_offset + copy_len]);
+                }
+            }
+            Ok(())
+        })?
     }
 }

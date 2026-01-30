@@ -8,9 +8,9 @@ ash = "0.38"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-drm = "0.12"
-gbm = "0.15"
-input-linux = "0.7"
+drm = "0.14"
+gbm = "0.18"
+input-linux = "0.7"  # Latest available on crates.io
 
 [target.'cfg(target_os = "redox")'.dependencies]
 # Redox-specific dependencies will go here

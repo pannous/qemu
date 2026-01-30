@@ -52,13 +52,14 @@ impl KeyboardInput {
                     // Check for key press events (value == 1 means press, not release)
                     if event.kind == EventKind::Key && event.value() == 1 {
                         // Get key code from event
-                        let key = Key::new(event.code);
-                        match key {
-                            Key::Left => return Some(KeyEvent::Left),
-                            Key::Right => return Some(KeyEvent::Right),
-                            Key::F => return Some(KeyEvent::Fullscreen),
-                            Key::Esc | Key::Q => return Some(KeyEvent::Quit),
-                            _ => {}
+                        if let Ok(key) = Key::from_code(event.code) {
+                            match key {
+                                Key::Left => return Some(KeyEvent::Left),
+                                Key::Right => return Some(KeyEvent::Right),
+                                Key::F => return Some(KeyEvent::Fullscreen),
+                                Key::Esc | Key::Q => return Some(KeyEvent::Quit),
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -70,11 +71,12 @@ impl KeyboardInput {
 }
 
 fn get_device_name(fd: i32) -> String {
-    // EVIOCGNAME ioctl number for getting device name (aarch64)
-    const EVIOCGNAME_256: i32 = 0x4506;
+    // EVIOCGNAME ioctl number for getting device name
+    // On aarch64 Linux, use proper ioctl request
+    const EVIOCGNAME_256: libc::c_int = 0x4506;
     let mut name = vec![0u8; 256];
     unsafe {
-        if libc::ioctl(fd, EVIOCGNAME_256 as libc::c_ulong, name.as_mut_ptr()) >= 0 {
+        if libc::ioctl(fd, EVIOCGNAME_256 as libc::c_ulong as libc::c_int, name.as_mut_ptr()) >= 0 {
             let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
             String::from_utf8_lossy(&name[..len]).to_string()
         } else {

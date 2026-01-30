@@ -4,11 +4,9 @@
 //   ESC/Q: Quit
 //   F: Toggle fullscreen
 
-use ash::vk;
-use std::ffi::{CStr, CString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 mod renderer;
