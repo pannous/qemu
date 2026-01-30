@@ -21,6 +21,7 @@ pub struct KeyboardInput {
 impl KeyboardInput {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         // Try to find a keyboard device
+        eprintln!("Scanning for keyboard input devices...");
         for i in 0..10 {
             let path = format!("/dev/input/event{}", i);
             if let Ok(file) = OpenOptions::new()
@@ -30,7 +31,8 @@ impl KeyboardInput {
             {
                 // Try to get device name to verify it's a keyboard
                 let name = get_device_name(file.as_raw_fd());
-                if name.to_lowercase().contains("keyboard") {
+                eprintln!("  {}: {}", path, name);
+                if name.to_lowercase().contains("keyboard") || name.to_lowercase().contains("input") {
                     println!("Using input: {} ({})", path, name);
                     return Ok(Self { device: Some(file) });
                 }

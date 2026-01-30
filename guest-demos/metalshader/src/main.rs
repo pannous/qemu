@@ -156,6 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             i_mouse: [0.0, 0.0, 0.0, 0.0],
         };
 
+        // DEBUG: Test pattern first to verify display works
+        static mut TEST_DONE: bool = false;
+        unsafe {
+            if !TEST_DONE {
+                renderer.fill_test_pattern();
+                TEST_DONE = true;
+            }
+        }
+
         // Render frame
         renderer.render_frame(&ubo)?;
 

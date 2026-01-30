@@ -62,13 +62,23 @@ impl Display {
 
         let connector = drm_card.get_connector(connector_handle, true)?;
 
-        // Get mode
-        let mode = connector
-            .modes()
-            .get(0)
+        // Get mode - prefer 800x600 or use first available
+        let modes = connector.modes();
+        eprintln!("Available modes: {} total", modes.len());
+        for (i, m) in modes.iter().take(5).enumerate() {
+            eprintln!("  Mode {}: {}x{}", i, m.size().0, m.size().1);
+        }
+
+        let mode = modes.iter()
+            .find(|m| {
+                let (w, h) = m.size();
+                w == 800 && h == 600
+            })
+            .or_else(|| modes.first())
             .ok_or("No display mode available")?;
 
         let (width, height) = mode.size();
+        eprintln!("Selected mode: {}x{}", width, height);
 
         // Get encoder and CRTC
         let crtc_id = connector
@@ -125,6 +135,17 @@ impl Display {
         let mut mapping = self.drm_card.map_dumb_buffer(&mut self.dumb_buffer)?;
         let buffer_slice = mapping.as_mut();
 
+        static mut DEBUG_COUNT: u32 = 0;
+        unsafe {
+            if DEBUG_COUNT == 0 {
+                eprintln!("=== DISPLAY DEBUG ===");
+                eprintln!("Frame data len: {}, src_row_pitch: {}", frame_data.len(), src_row_pitch);
+                eprintln!("Buffer len: {}, dst_stride: {}", buffer_slice.len(), dst_stride);
+                eprintln!("Dimensions: {}x{}, row_size: {}", self.width, self.height, row_size);
+                eprintln!("First 16 bytes of source: {:02x?}", &frame_data[0..16.min(frame_data.len())]);
+            }
+        }
+
         for y in 0..self.height as usize {
             let dst_offset = y * dst_stride;
             let src_offset = y * src_row_pitch;  // Use Vulkan's row pitch
@@ -134,6 +155,19 @@ impl Display {
                     .copy_from_slice(&frame_data[src_offset..src_offset + copy_len]);
             }
         }
+
+        unsafe {
+            if DEBUG_COUNT == 0 {
+                eprintln!("First 16 bytes of dest after copy: {:02x?}", &buffer_slice[0..16.min(buffer_slice.len())]);
+                DEBUG_COUNT = 1;
+            }
+        }
+
+        // CRITICAL: Mark framebuffer as dirty so DRM actually displays it!
+        drop(mapping);  // Unmap before dirty call
+        use drm::control::ClipRect;
+        let clip = ClipRect::new(0, 0, self.width as u16, self.height as u16);
+        self.drm_card.dirty_framebuffer(self.fb_id, &[clip])?;
 
         Ok(())
     }

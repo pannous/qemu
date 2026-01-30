@@ -536,12 +536,43 @@ impl VulkanRenderer {
 
     pub fn get_frame_buffer(&self) -> &[u8] {
         unsafe {
-            std::slice::from_raw_parts(self.render_target_ptr, self.render_target_size)
+            let buffer = std::slice::from_raw_parts(self.render_target_ptr, self.render_target_size);
+
+            // Debug: check first few pixels
+            if buffer.len() >= 16 {
+                let first_pixels: Vec<u8> = buffer[0..16].to_vec();
+                eprintln!("First 16 bytes of framebuffer: {:02x?}", first_pixels);
+                eprintln!("Row pitch: {}, Width: {}, Expected: {}",
+                    self.row_pitch, self.width, self.width * 4);
+            }
+
+            buffer
         }
     }
 
     pub fn get_row_pitch(&self) -> usize {
         self.row_pitch
+    }
+
+    // DEBUG: Fill framebuffer with test pattern
+    pub fn fill_test_pattern(&mut self) {
+        unsafe {
+            let buffer = std::slice::from_raw_parts_mut(self.render_target_ptr, self.render_target_size);
+            for y in 0..self.height as usize {
+                for x in 0..self.width as usize {
+                    let offset = y * self.row_pitch + x * 4;
+                    if offset + 3 < buffer.len() {
+                        // Checkerboard pattern
+                        let checker = ((x / 64) + (y / 64)) % 2;
+                        buffer[offset + 0] = if checker == 1 { 255 } else { 0 }; // B
+                        buffer[offset + 1] = if checker == 1 { 0 } else { 255 }; // G
+                        buffer[offset + 2] = 0; // R
+                        buffer[offset + 3] = 255; // A
+                    }
+                }
+            }
+            eprintln!("Filled test pattern: {}x{} with row_pitch {}", self.width, self.height, self.row_pitch);
+        }
     }
 
     fn create_texture(
