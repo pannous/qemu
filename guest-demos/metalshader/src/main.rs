@@ -1,0 +1,214 @@
+// Metalshader - Interactive shader viewer in Rust
+// Controls:
+//   Arrow Left/Right: Switch between shaders
+//   ESC/Q: Quit
+//   F: Toggle fullscreen
+
+use ash::vk;
+use std::ffi::{CStr, CString};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+mod renderer;
+mod shader;
+
+#[cfg(target_os = "linux")]
+mod display;
+#[cfg(target_os = "linux")]
+mod input;
+
+#[cfg(target_os = "linux")]
+use display::Display;
+#[cfg(target_os = "linux")]
+use input::KeyboardInput;
+
+use renderer::VulkanRenderer;
+use shader::ShaderManager;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct ShaderToyUBO {
+    i_resolution: [f32; 3],
+    i_time: f32,
+    i_mouse: [f32; 4],
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let shader_name = if args.len() < 2 {
+        "example"
+    } else {
+        args[1].as_str()
+    };
+
+    // Extract base name from path
+    let shader_name = Path::new(shader_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("example");
+
+    // Initialize shader manager and scan for shaders
+    let mut shader_manager = ShaderManager::new();
+    shader_manager.scan_shaders(&[".", "./shaders", "/root/metalshade/shaders"])?;
+
+    if shader_manager.is_empty() {
+        eprintln!("No compiled shaders found.");
+        eprintln!("Searched: . ./shaders /root/metalshade/shaders");
+        eprintln!("Compile shaders with: glslangValidator -V <shader>.vert -o <shader>.vert.spv");
+        return Err("No shaders found".into());
+    }
+
+    shader_manager.print_available();
+
+    // Find requested shader
+    let current_shader_idx = shader_manager
+        .find_by_name(shader_name)
+        .ok_or_else(|| {
+            eprintln!("Shader '{}' not found. Available shaders:", shader_name);
+            shader_manager.print_available();
+            "Shader not found"
+        })?;
+
+    println!("Starting with shader: {}", shader_name);
+
+    // Initialize display (DRM/GBM)
+    let mut display = Display::new()?;
+    let (width, height) = display.get_resolution();
+    println!("Display resolution: {}x{}", width, height);
+
+    // Initialize keyboard input
+    let mut keyboard = KeyboardInput::new()?;
+
+    // Initialize Vulkan renderer
+    let mut renderer = VulkanRenderer::new(width, height)?;
+    println!(
+        "Metalshader on {} ({}x{})",
+        renderer.get_device_name(),
+        width,
+        height
+    );
+
+    // Main loop state
+    let mut current_shader_idx = current_shader_idx;
+    let mut reload_requested = true;
+    let start_time = Instant::now();
+    let mut frame_count = 0u32;
+
+    loop {
+        // Handle shader reload
+        if reload_requested {
+            let shader_info = shader_manager.get(current_shader_idx).unwrap();
+            match renderer.load_shader(&shader_info.vert_path, &shader_info.frag_path) {
+                Ok(_) => {
+                    println!("Loaded shader: {}", shader_info.name);
+                    reload_requested = false;
+                }
+                Err(e) => {
+                    eprintln!("Failed to load shader '{}': {}", shader_info.name, e);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+            }
+        }
+
+        // Calculate time
+        let elapsed = start_time.elapsed().as_secs_f32();
+
+        // Check keyboard input
+        if let Some(event) = keyboard.poll_event() {
+            match event {
+                input::KeyEvent::Left => {
+                    current_shader_idx = shader_manager.prev(current_shader_idx);
+                    reload_requested = true;
+                    println!(
+                        "\n<< Previous shader: {}",
+                        shader_manager.get(current_shader_idx).unwrap().name
+                    );
+                }
+                input::KeyEvent::Right => {
+                    current_shader_idx = shader_manager.next(current_shader_idx);
+                    reload_requested = true;
+                    println!(
+                        "\n>> Next shader: {}",
+                        shader_manager.get(current_shader_idx).unwrap().name
+                    );
+                }
+                input::KeyEvent::Fullscreen => {
+                    println!("\n[F] Toggling host fullscreen...");
+                    if let Err(e) = send_fullscreen_command() {
+                        eprintln!("    (Can't send fullscreen command: {})", e);
+                        eprintln!("    Press Ctrl+Alt+F on Mac host");
+                    }
+                }
+                input::KeyEvent::Quit => {
+                    println!("\nExiting...");
+                    break;
+                }
+            }
+        }
+
+        // Update UBO
+        let ubo = ShaderToyUBO {
+            i_resolution: [width as f32, height as f32, 1.0],
+            i_time: elapsed,
+            i_mouse: [0.0, 0.0, 0.0, 0.0],
+        };
+
+        // Render frame
+        renderer.render_frame(&ubo)?;
+
+        // Copy to display
+        display.present(renderer.get_frame_buffer())?;
+
+        // Print FPS
+        frame_count += 1;
+        if frame_count % 60 == 0 {
+            let fps = frame_count as f32 / elapsed;
+            println!(
+                "{:.1}s: {} frames ({:.1} FPS) - {}",
+                elapsed,
+                frame_count,
+                fps,
+                shader_manager.get(current_shader_idx).unwrap().name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "redox")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Redox support coming soon!");
+    eprintln!("The display and input modules need to be adapted for Redox.");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "redox")))]
+fn main() {
+    eprintln!("This platform is not supported.");
+    eprintln!("Supported platforms: Linux, Redox");
+}
+
+fn send_fullscreen_command() -> Result<(), Box<dyn std::error::Error>> {
+    // Find QEMU display control port
+    for i in 0..10 {
+        let name_path = format!("/sys/class/virtio-ports/vport{}p1/name", i);
+        if let Ok(mut file) = File::open(&name_path) {
+            let mut name = String::new();
+            file.read_to_string(&mut name)?;
+            if name.contains("org.qemu.display") {
+                let port_path = format!("/dev/vport{}p1", i);
+                let mut port = File::create(&port_path)?;
+                port.write_all(b"FULLSCREEN\n")?;
+                port.flush()?;
+                return Ok(());
+            }
+        }
+    }
+    Err("Display port not found".into())
+}
