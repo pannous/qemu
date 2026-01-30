@@ -73,12 +73,25 @@ impl KeyboardInput {
 }
 
 fn get_device_name(fd: i32) -> String {
-    // EVIOCGNAME ioctl number for getting device name
-    // On aarch64 Linux, use proper ioctl request
-    const EVIOCGNAME_256: libc::c_int = 0x4506;
+    // EVIOCGNAME ioctl: _IOC(_IOC_READ, 'E', 0x06, len)
+    // Properly construct ioctl number for aarch64
+    const _IOC_NRBITS: u32 = 8;
+    const _IOC_TYPEBITS: u32 = 8;
+    const _IOC_SIZEBITS: u32 = 14;
+    const _IOC_NRSHIFT: u32 = 0;
+    const _IOC_TYPESHIFT: u32 = _IOC_NRSHIFT + _IOC_NRBITS;
+    const _IOC_SIZESHIFT: u32 = _IOC_TYPESHIFT + _IOC_TYPEBITS;
+    const _IOC_DIRSHIFT: u32 = _IOC_SIZESHIFT + _IOC_SIZEBITS;
+    const _IOC_READ: u32 = 2;
+
+    const EVIOCGNAME_256: u32 = (_IOC_READ << _IOC_DIRSHIFT)
+                               | (0x45 << _IOC_TYPESHIFT)  // 'E'
+                               | (0x06 << _IOC_NRSHIFT)
+                               | (256 << _IOC_SIZESHIFT);
+
     let mut name = vec![0u8; 256];
     unsafe {
-        if libc::ioctl(fd, EVIOCGNAME_256 as libc::c_ulong as libc::c_int, name.as_mut_ptr()) >= 0 {
+        if libc::ioctl(fd, EVIOCGNAME_256 as libc::c_int, name.as_mut_ptr()) >= 0 {
             let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
             String::from_utf8_lossy(&name[..len]).to_string()
         } else {

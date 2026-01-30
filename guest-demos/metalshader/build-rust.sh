@@ -5,10 +5,10 @@ echo "Building metalshader (Rust)..."
 
 # Check if we're cross-compiling or building natively
 if [ "$1" = "cross" ]; then
-    echo "Cross-compiling for x86_64-unknown-linux-musl..."
-    cargo build --release --target x86_64-unknown-linux-musl
+    echo "Cross-compiling for aarch64-unknown-linux-musl (Alpine guest)..."
+    cargo build --release --target aarch64-unknown-linux-musl
     if [ $? -eq 0 ]; then
-        cp target/x86_64-unknown-linux-musl/release/metalshader ./metalshader-rust
+        cp target/aarch64-unknown-linux-musl/release/metalshader ./metalshader-rust
         echo "✓ Cross-compile successful: ./metalshader-rust"
         ls -lh metalshader-rust
     else

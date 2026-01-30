@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install Rust metalshader to Alpine guest
 
-GUEST_DIR="/root/metalshade"
+GUEST_DIR="/root/"
 
 echo "Installing Rust metalshader to guest..."
 
