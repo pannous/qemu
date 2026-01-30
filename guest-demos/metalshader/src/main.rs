@@ -146,6 +146,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             height = new_height;
                             reload_requested = true;
                             println!("    Resolution changed to {}x{}", new_width, new_height);
+                            // Skip rendering this frame - reload shader first
+                            continue;
                         }
                         Err(e) => {
                             eprintln!("    Failed to change resolution: {}", e);
