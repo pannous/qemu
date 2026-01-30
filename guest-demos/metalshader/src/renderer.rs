@@ -540,6 +540,10 @@ impl VulkanRenderer {
         }
     }
 
+    pub fn get_row_pitch(&self) -> usize {
+        self.row_pitch
+    }
+
     fn create_texture(
         device: &ash::Device,
         mem_props: &vk::PhysicalDeviceMemoryProperties,

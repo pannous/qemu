@@ -159,8 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Render frame
         renderer.render_frame(&ubo)?;
 
-        // Copy to display
-        display.present(renderer.get_frame_buffer())?;
+        // Copy to display (with correct row pitch)
+        display.present(renderer.get_frame_buffer(), renderer.get_row_pitch())?;
 
         // Print FPS
         frame_count += 1;

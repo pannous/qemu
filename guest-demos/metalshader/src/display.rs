@@ -116,19 +116,19 @@ impl Display {
         (self.width, self.height)
     }
 
-    pub fn present(&mut self, frame_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn present(&mut self, frame_data: &[u8], src_row_pitch: usize) -> Result<(), Box<dyn std::error::Error>> {
         let bytes_per_pixel = 4;
-        let row_size = self.width * bytes_per_pixel;
-        let stride = self.dumb_buffer.pitch();  // Get pitch before mapping
+        let row_size = self.width as usize * bytes_per_pixel;
+        let dst_stride = self.dumb_buffer.pitch() as usize;
 
         // Map DumbBuffer for CPU access
         let mut mapping = self.drm_card.map_dumb_buffer(&mut self.dumb_buffer)?;
         let buffer_slice = mapping.as_mut();
 
         for y in 0..self.height as usize {
-            let dst_offset = y * stride as usize;
-            let src_offset = y * row_size as usize;
-            let copy_len = row_size.min((buffer_slice.len() - dst_offset) as u32) as usize;
+            let dst_offset = y * dst_stride;
+            let src_offset = y * src_row_pitch;  // Use Vulkan's row pitch
+            let copy_len = row_size;
             if dst_offset + copy_len <= buffer_slice.len() && src_offset + copy_len <= frame_data.len() {
                 buffer_slice[dst_offset..dst_offset + copy_len]
                     .copy_from_slice(&frame_data[src_offset..src_offset + copy_len]);
