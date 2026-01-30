@@ -5,11 +5,24 @@ use drm::control::{connector, crtc, framebuffer, Device as ControlDevice};
 use drm::Device;
 use gbm::{BufferObjectFlags, Device as GbmDevice, Format};
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
+
+/// Wrapper for DRM device that implements required traits
+#[derive(Debug)]
+struct DrmCard(File);
+
+impl AsFd for DrmCard {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl Device for DrmCard {}
+impl ControlDevice for DrmCard {}
 
 pub struct Display {
     drm_fd: RawFd,
-    _drm_file: File,
+    drm_card: DrmCard,
     gbm_device: GbmDevice<File>,
     bo: gbm::BufferObject<()>,
     fb_id: framebuffer::Handle,
@@ -27,16 +40,17 @@ impl Display {
             .open("/dev/dri/card0")?;
 
         let drm_fd = drm_file.as_raw_fd();
+        let drm_card = DrmCard(drm_file);
 
-        // Get resources (DRM device) - File now implements Device trait
-        let res = drm_file.resource_handles()?;
+        // Get resources
+        let res = drm_card.resource_handles()?;
 
         // Find connected connector
         let connector_handle = res
             .connectors()
             .iter()
             .find_map(|&conn_handle| {
-                let conn = drm_file.get_connector(conn_handle).ok()?;
+                let conn = drm_card.get_connector(conn_handle, true).ok()?;
                 if conn.state() == connector::State::Connected {
                     Some(conn_handle)
                 } else {
@@ -45,7 +59,7 @@ impl Display {
             })
             .ok_or("No connected display found")?;
 
-        let connector = drm_file.get_connector(connector_handle)?;
+        let connector = drm_card.get_connector(connector_handle, true)?;
 
         // Get mode
         let mode = connector
@@ -58,13 +72,17 @@ impl Display {
         // Get encoder and CRTC
         let crtc_id = connector
             .current_encoder()
-            .and_then(|enc_handle| drm_file.get_encoder(enc_handle).ok())
+            .and_then(|enc_handle| drm_card.get_encoder(enc_handle).ok())
             .and_then(|enc| enc.crtc())
             .or_else(|| res.crtcs().first().copied())
             .ok_or("No CRTC found")?;
 
-        // Create GBM device
-        let gbm_device = GbmDevice::new(drm_file.try_clone()?)?;
+        // Create GBM device - need to open a separate file descriptor
+        let gbm_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/dri/card0")?;
+        let gbm_device = GbmDevice::new(gbm_file)?;
 
         // Create buffer object
         let bo = gbm_device.create_buffer_object::<()>(
@@ -74,13 +92,11 @@ impl Display {
             BufferObjectFlags::SCANOUT | BufferObjectFlags::RENDERING,
         )?;
 
-        let stride = bo.stride();  // Returns u32, not Result
+        // Create framebuffer
+        let fb_id = drm_card.add_framebuffer(&bo, 24, 32)?;
 
-        // Create framebuffer - use the drm_file (File implements Device)
-        let fb_id = drm_file.add_framebuffer(&bo, 32, 32)?;
-
-        // Set CRTC - use drm_file
-        drm_file.set_crtc(
+        // Set CRTC
+        drm_card.set_crtc(
             crtc_id,
             Some(fb_id),
             (0, 0),
@@ -90,7 +106,7 @@ impl Display {
 
         Ok(Self {
             drm_fd,
-            _drm_file: drm_file,
+            drm_card,
             gbm_device,
             bo,
             fb_id,
@@ -105,8 +121,8 @@ impl Display {
     }
 
     pub fn present(&mut self, frame_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Map GBM buffer using closure-based API (gbm 0.18)
-        self.bo.map(0, 0, self.width, self.height, |mapping| {
+        // Map GBM buffer using map_mut for write access (gbm 0.18)
+        self.bo.map_mut(0, 0, self.width, self.height, |mapping| {
             let bytes_per_pixel = 4;
             let row_size = self.width * bytes_per_pixel;
             let stride = mapping.stride();
