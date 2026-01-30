@@ -1,9 +1,9 @@
-// DRM/GBM display management
+// DRM display management using DumbBuffer
 #![cfg(target_os = "linux")]
 
-use drm::control::{connector, crtc, framebuffer, Device as ControlDevice};
+use drm::control::{connector, crtc, framebuffer, Device as ControlDevice, dumbbuffer::DumbBuffer};
+use drm::buffer::{Buffer, DrmFourcc};
 use drm::Device;
-use gbm::{BufferObjectFlags, Device as GbmDevice, Format};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
@@ -23,8 +23,7 @@ impl ControlDevice for DrmCard {}
 pub struct Display {
     drm_fd: RawFd,
     drm_card: DrmCard,
-    gbm_device: GbmDevice<File>,
-    bo: gbm::BufferObject<()>,
+    dumb_buffer: DumbBuffer,
     fb_id: framebuffer::Handle,
     crtc_id: crtc::Handle,
     width: u32,
@@ -37,13 +36,15 @@ impl Display {
         let drm_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/dev/dri/card0")?;
+            .open("/dev/dri/card0")
+            .map_err(|e| format!("Failed to open /dev/dri/card0: {}", e))?;
 
         let drm_fd = drm_file.as_raw_fd();
         let drm_card = DrmCard(drm_file);
 
         // Get resources
-        let res = drm_card.resource_handles()?;
+        let res = drm_card.resource_handles()
+            .map_err(|e| format!("Failed to get DRM resources: {}", e))?;
 
         // Find connected connector
         let connector_handle = res
@@ -77,24 +78,20 @@ impl Display {
             .or_else(|| res.crtcs().first().copied())
             .ok_or("No CRTC found")?;
 
-        // Create GBM device - need to open a separate file descriptor
-        let gbm_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/dri/card0")?;
-        let gbm_device = GbmDevice::new(gbm_file)?;
+        eprintln!("Creating dumb buffer: {}x{}", width, height);
+        // Create DumbBuffer (CPU-accessible buffer for virtio-gpu)
+        let dumb_buffer = drm_card.create_dumb_buffer(
+            (width as u32, height as u32),
+            DrmFourcc::Xrgb8888,
+            32 // bpp
+        ).map_err(|e| format!("Failed to create dumb buffer {}x{}: {}", width, height, e))?;
 
-        // Create buffer object
-        let bo = gbm_device.create_buffer_object::<()>(
-            width as u32,
-            height as u32,
-            Format::Xrgb8888,
-            BufferObjectFlags::SCANOUT | BufferObjectFlags::RENDERING,
-        )?;
-
+        eprintln!("Creating framebuffer");
         // Create framebuffer
-        let fb_id = drm_card.add_framebuffer(&bo, 24, 32)?;
+        let fb_id = drm_card.add_framebuffer(&dumb_buffer, 24, 32)
+            .map_err(|e| format!("Failed to add framebuffer: {}", e))?;
 
+        eprintln!("Setting CRTC");
         // Set CRTC
         drm_card.set_crtc(
             crtc_id,
@@ -102,13 +99,12 @@ impl Display {
             (0, 0),
             &[connector_handle],
             Some(*mode),
-        )?;
+        ).map_err(|e| format!("Failed to set CRTC: {}", e))?;
 
         Ok(Self {
             drm_fd,
             drm_card,
-            gbm_device,
-            bo,
+            dumb_buffer,
             fb_id,
             crtc_id,
             width: width as u32,
@@ -121,23 +117,24 @@ impl Display {
     }
 
     pub fn present(&mut self, frame_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Map GBM buffer using map_mut for write access (gbm 0.18)
-        self.bo.map_mut(0, 0, self.width, self.height, |mapping| {
-            let bytes_per_pixel = 4;
-            let row_size = self.width * bytes_per_pixel;
-            let stride = mapping.stride();
-            let buffer_slice = mapping.buffer_mut();
+        let bytes_per_pixel = 4;
+        let row_size = self.width * bytes_per_pixel;
+        let stride = self.dumb_buffer.pitch();  // Get pitch before mapping
 
-            for y in 0..self.height as usize {
-                let dst_offset = y * stride as usize;
-                let src_offset = y * row_size as usize;
-                let copy_len = row_size.min((buffer_slice.len() - dst_offset) as u32) as usize;
-                if dst_offset + copy_len <= buffer_slice.len() && src_offset + copy_len <= frame_data.len() {
-                    buffer_slice[dst_offset..dst_offset + copy_len]
-                        .copy_from_slice(&frame_data[src_offset..src_offset + copy_len]);
-                }
+        // Map DumbBuffer for CPU access
+        let mut mapping = self.drm_card.map_dumb_buffer(&mut self.dumb_buffer)?;
+        let buffer_slice = mapping.as_mut();
+
+        for y in 0..self.height as usize {
+            let dst_offset = y * stride as usize;
+            let src_offset = y * row_size as usize;
+            let copy_len = row_size.min((buffer_slice.len() - dst_offset) as u32) as usize;
+            if dst_offset + copy_len <= buffer_slice.len() && src_offset + copy_len <= frame_data.len() {
+                buffer_slice[dst_offset..dst_offset + copy_len]
+                    .copy_from_slice(&frame_data[src_offset..src_offset + copy_len]);
             }
-            Ok(())
-        })?
+        }
+
+        Ok(())
     }
 }
