@@ -1,6 +1,7 @@
 // Metalshader - Interactive shader viewer in Rust
 // Controls:
 //   Arrow Left/Right: Switch between shaders
+//   1-9: Change resolution mode
 //   ESC/Q: Quit
 //   F: Toggle fullscreen
 
@@ -75,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize display (DRM/GBM)
     let mut display = Display::new()?;
-    let (width, height) = display.get_resolution();
+    let (mut width, mut height) = display.get_resolution();
     println!("Display resolution: {}x{}", width, height);
 
     // Initialize keyboard input
@@ -134,6 +135,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "\n>> Next shader: {}",
                         shader_manager.get(current_shader_idx).unwrap().name
                     );
+                }
+                input::KeyEvent::Resolution(mode_num) => {
+                    println!("\n[{}] Changing resolution...", mode_num);
+                    match display.set_mode(mode_num) {
+                        Ok((new_width, new_height)) => {
+                            // Recreate renderer at new resolution
+                            renderer = VulkanRenderer::new(new_width, new_height)?;
+                            width = new_width;
+                            height = new_height;
+                            reload_requested = true;
+                            println!("    Resolution changed to {}x{}", new_width, new_height);
+                        }
+                        Err(e) => {
+                            eprintln!("    Failed to change resolution: {}", e);
+                        }
+                    }
                 }
                 input::KeyEvent::Fullscreen => {
                     println!("\n[F] Toggling host fullscreen...");

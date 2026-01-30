@@ -12,6 +12,7 @@ pub enum KeyEvent {
     Right,
     Fullscreen,
     Quit,
+    Resolution(u8),  // 1-9 for mode selection
 }
 
 pub struct KeyboardInput {
@@ -53,7 +54,15 @@ impl KeyboardInput {
                 Ok(true) => {
                     // Check for key press events (value == 1 means press, not release)
                     if event.kind == EventKind::Key && event.value() == 1 {
-                        // Get key code from event
+                        // Check for number keys using raw codes (KEY_1 = 2, KEY_2 = 3, etc.)
+                        if event.code >= 2 && event.code <= 10 {
+                            let mode_num = if event.code == 10 { 0 } else { event.code - 1 } as u8;
+                            if mode_num >= 1 && mode_num <= 9 {
+                                return Some(KeyEvent::Resolution(mode_num));
+                            }
+                        }
+
+                        // Get key code from event for named keys
                         if let Ok(key) = Key::from_code(event.code) {
                             match key {
                                 Key::Left => return Some(KeyEvent::Left),

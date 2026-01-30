@@ -26,6 +26,9 @@ pub struct Display {
     dumb_buffer: DumbBuffer,
     fb_id: framebuffer::Handle,
     crtc_id: crtc::Handle,
+    connector_handle: connector::Handle,
+    modes: Vec<drm::control::Mode>,
+    current_mode_idx: usize,
     width: u32,
     height: u32,
 }
@@ -62,23 +65,19 @@ impl Display {
 
         let connector = drm_card.get_connector(connector_handle, true)?;
 
-        // Get mode - prefer 800x600 or use first available
-        let modes = connector.modes();
+        // Get all available modes
+        let modes: Vec<_> = connector.modes().to_vec();
         eprintln!("Available modes: {} total", modes.len());
-        for (i, m) in modes.iter().take(5).enumerate() {
-            eprintln!("  Mode {}: {}x{}", i, m.size().0, m.size().1);
+        for (i, m) in modes.iter().take(9).enumerate() {
+            eprintln!("  [{}] {}x{}", i + 1, m.size().0, m.size().1);
         }
 
-        let mode = modes.iter()
-            .find(|m| {
-                let (w, h) = m.size();
-                w == 800 && h == 600
-            })
-            .or_else(|| modes.first())
+        let current_mode_idx = 0;
+        let mode = modes.first()
             .ok_or("No display mode available")?;
 
         let (width, height) = mode.size();
-        eprintln!("Selected mode: {}x{}", width, height);
+        eprintln!("Selected mode: [1] {}x{}", width, height);
 
         // Get encoder and CRTC
         let crtc_id = connector
@@ -117,9 +116,55 @@ impl Display {
             dumb_buffer,
             fb_id,
             crtc_id,
+            connector_handle,
+            modes,
+            current_mode_idx,
             width: width as u32,
             height: height as u32,
         })
+    }
+
+    pub fn set_mode(&mut self, mode_number: u8) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        let mode_idx = (mode_number - 1) as usize;
+        if mode_idx >= self.modes.len() {
+            return Err(format!("Mode {} not available (only {} modes)", mode_number, self.modes.len()).into());
+        }
+
+        let mode = &self.modes[mode_idx];
+        let (width, height) = mode.size();
+
+        eprintln!("\nSwitching to mode [{}]: {}x{}", mode_number, width, height);
+
+        // Remove old framebuffer
+        let _ = self.drm_card.destroy_framebuffer(self.fb_id);
+
+        // Destroy old dumb buffer
+        let _ = self.drm_card.destroy_dumb_buffer(self.dumb_buffer);
+
+        // Create new dumb buffer at new resolution
+        self.dumb_buffer = self.drm_card.create_dumb_buffer(
+            (width as u32, height as u32),
+            DrmFourcc::Xrgb8888,
+            32
+        )?;
+
+        // Create new framebuffer
+        self.fb_id = self.drm_card.add_framebuffer(&self.dumb_buffer, 24, 32)?;
+
+        // Set CRTC to new mode
+        self.drm_card.set_crtc(
+            self.crtc_id,
+            Some(self.fb_id),
+            (0, 0),
+            &[self.connector_handle],
+            Some(*mode),
+        )?;
+
+        self.current_mode_idx = mode_idx;
+        self.width = width as u32;
+        self.height = height as u32;
+
+        Ok((self.width, self.height))
     }
 
     pub fn get_resolution(&self) -> (u32, u32) {
