@@ -98,3 +98,69 @@ Virtual GPUs like virtio-gpu prefer DumbBuffer over GBM because:
 ✅ High-performance frame updates (500+ FPS)
 ✅ Multiple shader support (11 shaders available)
 
+
+---
+
+## 🚀 GPU Rendering SUCCESS!
+**Date:** 2026-01-30
+**Status:** COMPLETE ✅
+
+### The Victory
+**GPU-accelerated shader rendering is now working!**
+Vulkan → Venus → virtio-gpu → MoltenVK → Metal pipeline operational!
+
+### Performance
+- **700-800 FPS** on Apple M2 Pro
+- **Real GPU rendering** (not CPU fallback)
+- **Multiple shaders working** (plasma, example, cube, etc.)
+
+### The Critical Fix: `dirty_framebuffer()`
+The missing piece was calling `dirty_framebuffer()` after copying Vulkan output to DumbBuffer:
+- Vulkan renders to HOST_VISIBLE LINEAR image ✅
+- Copy to DumbBuffer for display ✅  
+- **Call dirty_framebuffer() to trigger scanout** ← This was missing!
+
+Without this call, the framebuffer sits in memory but never gets displayed.
+
+### Architecture
+```
+Shader (SPIR-V)
+    ↓
+Vulkan Rendering (GPU-accelerated)
+    ↓
+Venus Protocol (virtio-gpu)
+    ↓
+MoltenVK Translation
+    ↓
+Metal (Apple GPU)
+    ↓
+Linear Image (HOST_VISIBLE)
+    ↓
+Copy to DumbBuffer
+    ↓
+dirty_framebuffer() ← KEY!
+    ↓
+DRM Scanout → Display
+```
+
+### What Works
+✅ GPU-accelerated shader rendering
+✅ Vulkan → Metal translation via MoltenVK
+✅ Real-time shader updates (700-800 FPS)
+✅ Multiple shader support
+✅ Display output via DRM/KMS
+✅ 800x600 mode selection
+
+### Known Issues
+- ⚠️ Keyboard input detection (devices return "Unknown")
+- ⚠️ Arrow key navigation not working
+- ⚠️ F key (fullscreen) not working
+- ⚠️ ESC (quit) not working
+
+### Next Steps
+1. Fix input device detection (QEMU virtual keyboard)
+2. Enable shader switching with arrow keys
+3. Fix fullscreen toggle
+4. Test on Redox OS (different display APIs needed)
+
+**This is the real milestone** - GPU rendering via the full Vulkan→Metal stack! 🎉
