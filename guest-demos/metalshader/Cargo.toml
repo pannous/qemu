@@ -8,8 +8,8 @@ ash = "0.38"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-drm = "0.14"
-gbm = "0.18"
+drm = "0.14"  # new - modern DRM API
+gbm = "0.18"  # new - GBM buffer management
 input-linux = "0.7"  # Latest available on crates.io
 
 [target.'cfg(target_os = "redox")'.dependencies]
