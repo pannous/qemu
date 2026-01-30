@@ -4,6 +4,54 @@ A celebration of progress on the journey to bring Vulkan rendering to macOS and 
 
 ---
 
+## ⌨️ Keyboard Input Detection Fixed!
+**Date:** 2026-01-30
+**Status:** COMPLETE ✅
+
+### The Problem
+All input devices returned "Unknown" and keyboard navigation was completely broken:
+```
+Scanning for keyboard input devices...
+  /dev/input/event0: Unknown
+  /dev/input/event1: Unknown
+  /dev/input/event2: Unknown
+Warning: No keyboard input found
+```
+
+### Root Cause
+The EVIOCGNAME ioctl number was incorrect for aarch64 architecture:
+- Used: `0x4506` (incomplete, missing direction/size bits)
+- Needed: `0x81004506` (properly constructed with _IOC macro)
+
+### The Fix
+Properly construct the ioctl number using Linux _IOC macro constants:
+```rust
+const EVIOCGNAME_256: u32 = (_IOC_READ << _IOC_DIRSHIFT)   // direction bit
+                           | (0x45 << _IOC_TYPESHIFT)      // 'E' = evdev
+                           | (0x06 << _IOC_NRSHIFT)        // command nr
+                           | (256 << _IOC_SIZESHIFT);      // buffer size
+```
+
+### The Victory
+Keyboard now detected successfully! 🎉
+```
+Scanning for keyboard input devices...
+  /dev/input/event0: gpio-keys
+  /dev/input/event1: QEMU QEMU USB Keyboard  ← DETECTED!
+Using input: /dev/input/event1 (QEMU QEMU USB Keyboard)
+```
+
+### What Now Works
+✅ Device name detection via EVIOCGNAME ioctl
+✅ Keyboard device identification ("keyboard" in name)
+✅ Input event polling setup
+✅ Ready for arrow keys, ESC, F (fullscreen) testing
+
+### Technical Insight
+ioctl numbers are architecture-specific! The same logical ioctl has different numeric values on different architectures due to how the _IOC macro encodes direction, type, number, and size bits.
+
+---
+
 ## ✨ Alpine Linux Compatibility Achievement
 **Date:** 2026-01-30
 **Status:** COMPLETE
@@ -152,15 +200,15 @@ DRM Scanout → Display
 ✅ 800x600 mode selection
 
 ### Known Issues
-- ⚠️ Keyboard input detection (devices return "Unknown")
-- ⚠️ Arrow key navigation not working
-- ⚠️ F key (fullscreen) not working
-- ⚠️ ESC (quit) not working
+- ✅ ~~Keyboard input detection~~ **FIXED!** (ioctl corrected for aarch64)
+- ⚠️ Arrow key navigation - needs testing with fixed keyboard
+- ⚠️ F key (fullscreen) - needs testing with fixed keyboard
+- ⚠️ ESC (quit) - needs testing with fixed keyboard
 
 ### Next Steps
-1. Fix input device detection (QEMU virtual keyboard)
-2. Enable shader switching with arrow keys
-3. Fix fullscreen toggle
+1. ✅ ~~Fix input device detection~~ **DONE!** Now detects "QEMU QEMU USB Keyboard"
+2. Test shader switching with arrow keys (keyboard detection fixed)
+3. Test fullscreen toggle (keyboard detection fixed)
 4. Test on Redox OS (different display APIs needed)
 
 **This is the real milestone** - GPU rendering via the full Vulkan→Metal stack! 🎉
