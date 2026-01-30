@@ -1,7 +1,7 @@
 // Keyboard input handling via Linux input events
 #![cfg(target_os = "linux")]
 
-use input_linux::{EventKind, InputEvent, Key};
+use input_linux::{EventKind, InputEvent, Key, GenericEvent};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
@@ -46,20 +46,19 @@ impl KeyboardInput {
 
         // Read events in non-blocking mode
         loop {
-            let mut event = InputEvent::default();
+            let mut event = InputEvent::zeroed();
             match read_input_event(device, &mut event) {
                 Ok(true) => {
-                    // Check for key press events
-                    if let EventKind::Key(key) = event.kind {
-                        if event.value == 1 {
-                            // Key press
-                            match key {
-                                Key::Left => return Some(KeyEvent::Left),
-                                Key::Right => return Some(KeyEvent::Right),
-                                Key::F => return Some(KeyEvent::Fullscreen),
-                                Key::Esc | Key::Q => return Some(KeyEvent::Quit),
-                                _ => {}
-                            }
+                    // Check for key press events (value == 1 means press, not release)
+                    if event.kind == EventKind::Key && event.value() == 1 {
+                        // Get key code from event
+                        let key = Key::new(event.code);
+                        match key {
+                            Key::Left => return Some(KeyEvent::Left),
+                            Key::Right => return Some(KeyEvent::Right),
+                            Key::F => return Some(KeyEvent::Fullscreen),
+                            Key::Esc | Key::Q => return Some(KeyEvent::Quit),
+                            _ => {}
                         }
                     }
                 }
@@ -71,9 +70,11 @@ impl KeyboardInput {
 }
 
 fn get_device_name(fd: i32) -> String {
+    // EVIOCGNAME ioctl number for getting device name (aarch64)
+    const EVIOCGNAME_256: i32 = 0x4506;
     let mut name = vec![0u8; 256];
     unsafe {
-        if libc::ioctl(fd, input_linux::sys::eviocgname(name.len()), name.as_mut_ptr()) >= 0 {
+        if libc::ioctl(fd, EVIOCGNAME_256 as libc::c_ulong, name.as_mut_ptr()) >= 0 {
             let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
             String::from_utf8_lossy(&name[..len]).to_string()
         } else {

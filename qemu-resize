@@ -1,0 +1,58 @@
+#!/bin/sh
+# qemu-resize - Change QEMU host window resolution from guest
+#
+# Usage: qemu-resize <width> <height>
+#        qemu-resize 800 600
+#        qemu-resize 1920 1080
+
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <width> <height>"
+    echo ""
+    echo "Common resolutions:"
+    echo "  800x600    - SVGA"
+    echo "  1024x768   - XGA"
+    echo "  1280x720   - HD 720p"
+    echo "  1920x1080  - Full HD 1080p"
+    echo "  2560x1440  - QHD 1440p"
+    echo ""
+    echo "Examples:"
+    echo "  $0 800 600"
+    echo "  $0 1920 1080"
+    exit 1
+fi
+
+WIDTH=$1
+HEIGHT=$2
+
+# Validate numeric inputs
+if ! echo "$WIDTH" | grep -qE '^[0-9]+$' || ! echo "$HEIGHT" | grep -qE '^[0-9]+$'; then
+    echo "Error: Width and height must be numeric"
+    exit 1
+fi
+
+# Validate ranges
+if [ "$WIDTH" -lt 640 ] || [ "$WIDTH" -gt 3840 ] || [ "$HEIGHT" -lt 480 ] || [ "$HEIGHT" -gt 2160 ]; then
+    echo "Error: Resolution out of range (640x480 to 3840x2160)"
+    exit 1
+fi
+
+# Find the display control port by name
+DISPLAY_PORT=""
+for port in /sys/class/virtio-ports/vport*/name; do
+    if [ -f "$port" ] && grep -q "org.qemu.display" "$port"; then
+        DISPLAY_PORT="/dev/$(basename $(dirname $port))"
+        break
+    fi
+done
+
+if [ -z "$DISPLAY_PORT" ]; then
+    echo "Error: QEMU display control port not found"
+    echo "Checked: /sys/class/virtio-ports/vport*/name"
+    echo "Make sure QEMU has virtio-serial-pci and virtserialport devices"
+    exit 1
+fi
+
+# Send resize command to QEMU host
+echo "RESIZE:${WIDTH}x${HEIGHT}" > "$DISPLAY_PORT"
+echo "Requested host window resize to ${WIDTH}x${HEIGHT} via $DISPLAY_PORT"
+echo "(Note: Guest framebuffer remains at DRM mode size)"

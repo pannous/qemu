@@ -2,8 +2,8 @@
 #![cfg(target_os = "linux")]
 
 use drm::control::{connector, crtc, framebuffer, Mode, ResourceHandle};
-use drm::Device;
-use gbm::{BufferObjectFlags, Device as GbmDevice, Format};
+use drm::Device as DrmDevice;
+use gbm::{BufferObjectFlags, Device as GbmDevice, Format, AsRaw};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -29,20 +29,15 @@ impl Display {
 
         let drm_fd = drm_file.as_raw_fd();
 
-        // Set master
-        unsafe {
-            drm::ffi::drm_set_master(drm_fd)?;
-        }
-
-        // Get resources
-        let res = drm::control::Device::resource_handles(&drm_file)?;
+        // Get resources (DRM device)
+        let res = drm_file.resource_handles()?;
 
         // Find connected connector
         let connector_handle = res
             .connectors()
             .iter()
             .find_map(|&conn_handle| {
-                let conn = drm::control::Device::get_connector(&drm_file, conn_handle, false).ok()?;
+                let conn = drm_file.get_connector(conn_handle).ok()?;
                 if conn.state() == connector::State::Connected {
                     Some(conn_handle)
                 } else {
@@ -51,7 +46,7 @@ impl Display {
             })
             .ok_or("No connected display found")?;
 
-        let connector = drm::control::Device::get_connector(&drm_file, connector_handle, false)?;
+        let connector = drm_file.get_connector(connector_handle)?;
 
         // Get mode
         let mode = connector
@@ -62,39 +57,31 @@ impl Display {
         let (width, height) = mode.size();
 
         // Get encoder and CRTC
-        let encoder_handle = connector
+        let crtc_id = connector
             .current_encoder()
-            .or_else(|| connector.encoders().get(0).copied())
-            .ok_or("No encoder found")?;
-
-        let encoder = drm::control::Device::get_encoder(&drm_file, encoder_handle)?;
-        let crtc_id = encoder.crtc().unwrap_or_else(|| *res.crtcs().first().unwrap());
+            .and_then(|enc_handle| drm_file.get_encoder(enc_handle).ok())
+            .and_then(|enc| enc.crtc())
+            .or_else(|| res.crtcs().first().copied())
+            .ok_or("No CRTC found")?;
 
         // Create GBM device
         let gbm_device = GbmDevice::new(drm_file.try_clone()?)?;
 
         // Create buffer object
         let bo = gbm_device.create_buffer_object::<()>(
-            width,
-            height,
+            width as u32,
+            height as u32,
             Format::Xrgb8888,
             BufferObjectFlags::SCANOUT | BufferObjectFlags::RENDERING,
         )?;
 
         let stride = bo.stride()?;
-        let handle = bo.handle()?;
 
-        // Create framebuffer
-        let fb_id = drm::control::Device::add_framebuffer(
-            &drm_file,
-            &bo,
-            32, // depth
-            32, // bpp
-        )?;
+        // Create framebuffer using GBM device (which implements DRM)
+        let fb_id = gbm_device.add_framebuffer(&bo, 32, 32)?;
 
         // Set CRTC
-        drm::control::Device::set_crtc(
-            &drm_file,
+        gbm_device.set_crtc(
             crtc_id,
             Some(fb_id),
             (0, 0),
@@ -120,48 +107,32 @@ impl Display {
     }
 
     pub fn present(&mut self, frame_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Map GBM buffer
-        let mut map_data = std::ptr::null_mut();
-        let mut stride = 0u32;
-
-        let ptr = unsafe {
-            gbm::ffi::gbm_bo_map(
-                self.bo.as_raw(),
-                0,
-                0,
-                self.width,
-                self.height,
-                gbm::ffi::GBM_BO_TRANSFER_WRITE,
-                &mut stride as *mut _,
-                &mut map_data,
-            )
-        };
-
-        if ptr.is_null() {
-            return Err("Failed to map GBM buffer".into());
-        }
+        // Map GBM buffer for writing
+        let mut buffer = self.bo.map_mut(
+            0,
+            0,
+            self.width,
+            self.height,
+            gbm::BufferAccessFlags::WRITE,
+        )?;
 
         // Copy frame data
         let bytes_per_pixel = 4;
         let row_size = self.width * bytes_per_pixel;
+        let stride = buffer.stride() as u32;
+
+        // Access the buffer data slice
+        let buffer_slice = buffer.as_mut();
 
         for y in 0..self.height as usize {
-            unsafe {
-                let dst = ptr.add(y * stride as usize);
-                let src = frame_data.as_ptr().add(y * row_size as usize);
-                std::ptr::copy_nonoverlapping(src, dst as *mut u8, row_size as usize);
-            }
+            let dst_offset = y * stride as usize;
+            let src_offset = y * row_size as usize;
+            let dst = &mut buffer_slice[dst_offset..dst_offset + row_size as usize];
+            let src = &frame_data[src_offset..src_offset + row_size as usize];
+            dst.copy_from_slice(src);
         }
 
-        // Unmap
-        unsafe {
-            gbm::ffi::gbm_bo_unmap(self.bo.as_raw(), map_data);
-        }
-
-        // Mark dirty
-        unsafe {
-            drm::ffi::drm_mode_dirty_fb(self.drm_fd, self.fb_id.into(), std::ptr::null(), 0)?;
-        }
+        // Buffer automatically unmapped on drop
 
         Ok(())
     }

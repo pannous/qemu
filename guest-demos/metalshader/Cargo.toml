@@ -10,7 +10,7 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = "0.12"
 gbm = "0.15"
-input-linux = "0.9"
+input-linux = "0.7"
 
 [target.'cfg(target_os = "redox")'.dependencies]
 # Redox-specific dependencies will go here

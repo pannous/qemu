@@ -27,7 +27,7 @@ mat4 rotationMatrix(vec3 axis, float angle) {
 }
 
 mat4 perspectiveMatrix(float fov, float aspect, float near, float far) {
-    float f = 1.0 / tan(fov / 2.0);
+    float f = 1.0 / tan(fov / 1.0);
     return mat4(
         f / aspect, 0.0, 0.0, 0.0,
         0.0, f, 0.0, 0.0,
@@ -55,7 +55,7 @@ void main() {
     vec2 uv = (fragCoord - 0.5 * ubo.iResolution.xy) / ubo.iResolution.y;
 
     // Camera setup
-    vec3 ro = vec3(0.0, 0.0, 3.0); // Ray origin
+    vec3 ro = vec3(0.0, 0.0, 5.0); // Ray origin
     vec3 rd = normalize(vec3(uv, -1.5)); // Ray direction
 
     // Rotate the entire scene (camera + ray) to animate the cube
@@ -68,7 +68,8 @@ void main() {
     vec3 boxSize = vec3(0.8);
     float t = boxIntersect(ro, rd, boxSize);
 
-    vec3 col = vec3(0.1, 0.1, 0.15); // Background
+    vec3 col = vec3(0.005, 0.005, 0.01); // Background
+    // vec3 col = vec3(0.1, 0.1, 0.15); // Background
 
     if (t > 0.0) {
         // Hit point

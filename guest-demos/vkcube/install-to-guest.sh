@@ -19,3 +19,4 @@ echo "Running build on guest..."
 ssh -p "$PORT" -o StrictHostKeyChecking=no root@localhost '/root/build.sh'
 
 echo "Done! Run with: ssh -p $PORT root@localhost /root/vkcube_anim"
+ssh -p 2222 root@localhost /root/vkcube_anim
